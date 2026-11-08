@@ -4,24 +4,72 @@
 //! min_should, field match, field range, has_id, is_empty, is_null, and nested.
 //! Other condition kinds return an error instead of being dropped.
 
-use qdrant_client::qdrant::{Condition, Filter, MinShould, PointId, QueryPointsBuilder, Range};
+use qdrant_client::qdrant::with_payload_selector::SelectorOptions;
+use qdrant_client::qdrant::{
+    Condition, ContextInputBuilder, DiscoverInputBuilder, Filter, MinShould,
+    PayloadIncludeSelector, PointId, PrefetchQueryBuilder, Query, QueryPointsBuilder, Range,
+    RecommendInputBuilder, VectorInput,
+};
+pub use qdrant_client::qdrant::{Fusion, RecommendStrategy};
 use serde_json::Value;
+
+use crate::client::Endpoint;
 
 pub const DEFAULT_URL: &str = "http://localhost:6334";
 pub const DEFAULT_LIMIT: u64 = 10;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+pub const PAGE_SIZE: u64 = 128;
 
 #[derive(Clone)]
-pub struct QueryRequest {
+pub struct Scope {
     pub collection: String,
-    pub vector: Vec<f32>,
     pub limit: u64,
     pub filter: Option<Filter>,
     pub using: Option<String>,
     pub score_threshold: Option<f32>,
-    pub url: String,
-    pub api_key: Option<String>,
-    pub timeout_secs: u64,
+    pub with_payload: bool,
+    pub payload_fields: Option<Vec<String>>,
+    pub endpoint: Endpoint,
+}
+
+#[derive(Clone)]
+pub struct QueryRequest {
+    pub scope: Scope,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Clone)]
+pub struct HybridRequest {
+    pub scope: Scope,
+    pub dense: Vec<f32>,
+    pub dense_using: Option<String>,
+    pub sparse: SparseVector,
+    pub sparse_using: String,
+    pub fusion: Fusion,
+    pub prefetch_limit: u64,
+}
+
+#[derive(Clone)]
+pub struct SparseVector {
+    pub indices: Vec<u32>,
+    pub values: Vec<f32>,
+}
+
+#[derive(Clone)]
+pub struct RecommendRequest {
+    pub scope: Scope,
+    pub positive_ids: Vec<PointId>,
+    pub negative_ids: Vec<PointId>,
+    pub positive_vector: Option<Vec<f32>>,
+    pub negative_vector: Option<Vec<f32>>,
+    pub strategy: RecommendStrategy,
+}
+
+#[derive(Clone)]
+pub struct DiscoverRequest {
+    pub scope: Scope,
+    pub target: Option<Vec<f32>>,
+    pub pairs: Vec<(VectorInput, VectorInput)>,
 }
 
 pub fn dense_vector(values: Vec<Option<f64>>) -> Result<Vec<f32>, String> {
@@ -51,21 +99,283 @@ pub fn parse_filter(text: &str) -> Result<Option<Filter>, String> {
     Ok(Some(filter_from_value(&value)?))
 }
 
-pub fn nearest_query(request: &QueryRequest) -> QueryPointsBuilder {
-    let mut query = QueryPointsBuilder::new(request.collection.clone())
-        .query(request.vector.clone())
-        .limit(request.limit)
-        .with_payload(true);
-    if let Some(filter) = &request.filter {
+pub fn payload_selector(with_payload: bool, fields: Option<&[String]>) -> SelectorOptions {
+    match fields {
+        Some([]) => false.into(),
+        Some(fields) => SelectorOptions::Include(PayloadIncludeSelector::new(fields.to_vec())),
+        None if with_payload => true.into(),
+        None => false.into(),
+    }
+}
+
+pub fn decorate(scope: &Scope, mut query: QueryPointsBuilder) -> QueryPointsBuilder {
+    query = query.limit(scope.limit).with_payload(payload_selector(
+        scope.with_payload,
+        scope.payload_fields.as_deref(),
+    ));
+    if let Some(filter) = &scope.filter {
         query = query.filter(filter.clone());
     }
-    if let Some(using) = &request.using {
+    if let Some(using) = &scope.using {
         query = query.using(using.clone());
     }
-    if let Some(threshold) = request.score_threshold {
+    if let Some(threshold) = scope.score_threshold {
         query = query.score_threshold(threshold);
     }
     query
+}
+
+pub fn nearest_page(request: &QueryRequest, offset: u64, page: u64) -> QueryPointsBuilder {
+    decorate(
+        &request.scope,
+        QueryPointsBuilder::new(request.scope.collection.clone()).query(request.vector.clone()),
+    )
+    .limit(page)
+    .offset(offset)
+}
+
+pub fn hybrid_query(request: &HybridRequest) -> QueryPointsBuilder {
+    let mut dense = PrefetchQueryBuilder::default()
+        .query(Query::new_nearest(request.dense.clone()))
+        .limit(request.prefetch_limit);
+    if let Some(using) = &request.dense_using {
+        dense = dense.using(using.clone());
+    }
+    let sparse = PrefetchQueryBuilder::default()
+        .using(request.sparse_using.clone())
+        .query(VectorInput::new_sparse(
+            request.sparse.indices.clone(),
+            request.sparse.values.clone(),
+        ))
+        .limit(request.prefetch_limit);
+    decorate(
+        &request.scope,
+        QueryPointsBuilder::new(request.scope.collection.clone())
+            .query(Query::new_fusion(request.fusion))
+            .add_prefetch(dense)
+            .add_prefetch(sparse),
+    )
+}
+
+pub fn recommend_query(request: &RecommendRequest) -> QueryPointsBuilder {
+    let mut recommend = RecommendInputBuilder::default().strategy(request.strategy as i32);
+    for id in &request.positive_ids {
+        recommend = recommend.add_positive(id.clone());
+    }
+    for id in &request.negative_ids {
+        recommend = recommend.add_negative(id.clone());
+    }
+    if let Some(vector) = &request.positive_vector {
+        recommend = recommend.add_positive(vector.clone());
+    }
+    if let Some(vector) = &request.negative_vector {
+        recommend = recommend.add_negative(vector.clone());
+    }
+    decorate(
+        &request.scope,
+        QueryPointsBuilder::new(request.scope.collection.clone())
+            .query(Query::new_recommend(recommend)),
+    )
+}
+
+pub fn discover_query(request: &DiscoverRequest) -> QueryPointsBuilder {
+    let mut context = ContextInputBuilder::default();
+    for (positive, negative) in &request.pairs {
+        context = context.add_pair(positive.clone(), negative.clone());
+    }
+    let query = match &request.target {
+        Some(target) => Query::new_discover(DiscoverInputBuilder::new(target.clone(), context)),
+        None => Query::new_context(context),
+    };
+    decorate(
+        &request.scope,
+        QueryPointsBuilder::new(request.scope.collection.clone()).query(query),
+    )
+}
+
+pub fn parse_sparse(text: &str) -> Result<SparseVector, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|err| format!("invalid sparse query JSON: {err}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "sparse query must be a JSON object with indices and values".to_string())?;
+    let indices = u32_array(object.get("indices").ok_or("sparse query needs indices")?)?;
+    let values = f32_array(object.get("values").ok_or("sparse query needs values")?)?;
+    if indices.len() != values.len() {
+        return Err(format!(
+            "sparse query indices ({}) and values ({}) differ in length",
+            indices.len(),
+            values.len()
+        ));
+    }
+    if indices.is_empty() {
+        return Err("sparse query is empty".to_string());
+    }
+    Ok(SparseVector { indices, values })
+}
+
+pub fn parse_fusion(text: &str) -> Result<Fusion, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "" | "rrf" => Ok(Fusion::Rrf),
+        "dbsf" => Ok(Fusion::Dbsf),
+        other => Err(format!("fusion must be rrf or dbsf, got {other}")),
+    }
+}
+
+pub fn parse_strategy(text: &str) -> Result<RecommendStrategy, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "" | "average" | "average_vector" => Ok(RecommendStrategy::AverageVector),
+        "best" | "best_score" => Ok(RecommendStrategy::BestScore),
+        "sum" | "sum_scores" => Ok(RecommendStrategy::SumScores),
+        other => Err(format!(
+            "strategy must be average, best, or sum, got {other}"
+        )),
+    }
+}
+
+pub fn parse_payload_fields(text: &str) -> Result<Option<Vec<String>>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.starts_with('[') {
+        let value: Value = serde_json::from_str(text)
+            .map_err(|err| format!("invalid payload_fields JSON: {err}"))?;
+        let array = value
+            .as_array()
+            .ok_or_else(|| "payload_fields must be a JSON array of strings".to_string())?;
+        let mut fields = Vec::with_capacity(array.len());
+        for item in array {
+            let field = item
+                .as_str()
+                .ok_or_else(|| "payload_fields entries must be strings".to_string())?;
+            fields.push(field.to_string());
+        }
+        return Ok(Some(fields));
+    }
+    Ok(Some(
+        text.split(',')
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .map(str::to_string)
+            .collect(),
+    ))
+}
+
+pub fn parse_id_list(text: &str) -> Result<Vec<PointId>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: Value =
+        serde_json::from_str(text).map_err(|err| format!("invalid id list JSON: {err}"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| "id list must be a JSON array".to_string())?;
+    array.iter().map(point_id_value).collect()
+}
+
+pub fn point_id_text(text: &str) -> Result<PointId, String> {
+    if text.is_empty() {
+        return Err("point id is empty".to_string());
+    }
+    if text.chars().all(|ch| ch.is_ascii_digit())
+        && let Ok(number) = text.parse::<u64>()
+    {
+        return Ok(PointId::from(number));
+    }
+    Ok(PointId::from(text.to_string()))
+}
+
+pub fn parse_context_pairs(text: &str) -> Result<Vec<(VectorInput, VectorInput)>, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|err| format!("invalid context JSON: {err}"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| "context must be a JSON array of positive and negative pairs".to_string())?;
+    if array.is_empty() {
+        return Err("context has no pairs".to_string());
+    }
+    array
+        .iter()
+        .map(|item| {
+            let object = item
+                .as_object()
+                .ok_or_else(|| "context pair must be a JSON object".to_string())?;
+            let positive = example_input(
+                object
+                    .get("positive")
+                    .ok_or("context pair needs positive")?,
+            )?;
+            let negative = example_input(
+                object
+                    .get("negative")
+                    .ok_or("context pair needs negative")?,
+            )?;
+            Ok((positive, negative))
+        })
+        .collect()
+}
+
+fn point_id_value(value: &Value) -> Result<PointId, String> {
+    match value {
+        Value::Number(number) => {
+            let id = number
+                .as_u64()
+                .ok_or_else(|| "point ids must be non-negative integers or strings".to_string())?;
+            Ok(PointId::from(id))
+        }
+        Value::String(text) => point_id_text(text),
+        _ => Err("point ids must be non-negative integers or strings".to_string()),
+    }
+}
+
+fn example_input(value: &Value) -> Result<VectorInput, String> {
+    match value {
+        Value::Array(items) => {
+            let vector = f32_array(value)?;
+            if vector.is_empty() {
+                return Err("context vector is empty".to_string());
+            }
+            let _ = items;
+            Ok(vector.into())
+        }
+        other => Ok(point_id_value(other)?.into()),
+    }
+}
+
+fn u32_array(value: &Value) -> Result<Vec<u32>, String> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| "indices must be an array".to_string())?;
+    array
+        .iter()
+        .map(|item| {
+            let number = item
+                .as_u64()
+                .ok_or_else(|| "sparse indices must be non-negative integers".to_string())?;
+            u32::try_from(number).map_err(|_| format!("sparse index {number} does not fit in u32"))
+        })
+        .collect()
+}
+
+fn f32_array(value: &Value) -> Result<Vec<f32>, String> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| "values must be an array of numbers".to_string())?;
+    array
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let number = item
+                .as_f64()
+                .ok_or_else(|| format!("value at index {index} is not a number"))?;
+            if !number.is_finite() {
+                return Err(format!("value at index {index} is not finite"));
+            }
+            Ok(number as f32)
+        })
+        .collect()
 }
 
 fn filter_from_value(value: &Value) -> Result<Filter, String> {
@@ -375,17 +685,23 @@ mod tests {
     #[test]
     fn nearest_query_keeps_limit_filter_and_named_vector() {
         let request = QueryRequest {
-            collection: "articles".to_string(),
+            scope: Scope {
+                collection: "articles".to_string(),
+                limit: 50,
+                filter: parse_filter(r#"{"must":[{"key":"year","range":{"gte":2024}}]}"#).unwrap(),
+                using: Some("dense".to_string()),
+                score_threshold: Some(0.75),
+                with_payload: true,
+                payload_fields: None,
+                endpoint: crate::client::Endpoint {
+                    url: DEFAULT_URL.to_string(),
+                    api_key: None,
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                },
+            },
             vector: vec![0.1, 0.2],
-            limit: 50,
-            filter: parse_filter(r#"{"must":[{"key":"year","range":{"gte":2024}}]}"#).unwrap(),
-            using: Some("dense".to_string()),
-            score_threshold: Some(0.75),
-            url: DEFAULT_URL.to_string(),
-            api_key: None,
-            timeout_secs: DEFAULT_TIMEOUT_SECS,
         };
-        let query = nearest_query(&request).build();
+        let query = nearest_page(&request, 0, request.scope.limit).build();
         assert_eq!(query.collection_name, "articles");
         assert_eq!(query.limit, Some(50));
         assert_eq!(query.using.as_deref(), Some("dense"));

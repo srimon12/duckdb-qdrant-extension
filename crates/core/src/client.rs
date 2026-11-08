@@ -1,21 +1,27 @@
-//! One Tokio runtime and one Qdrant client for the process.
+//! Tokio runtime and a small cache of Qdrant clients.
 //!
-//! shortcut: process-global client, rebuilt when url, api key, or timeout changes.
-//! Move it to connection-scoped state when `SET` options land.
+//! Each distinct url, api key, and timeout keeps its own client. Session
+//! settings are read at bind time, so two DuckDB sessions can use two servers.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use qdrant_client::Qdrant;
+use qdrant_client::{Qdrant, QdrantError};
+
+use crate::error::{explain, is_transient};
+
+const CACHE_LIMIT: usize = 8;
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-static CLIENT: Mutex<Option<CachedClient>> = Mutex::new(None);
+static CLIENTS: Mutex<Option<HashMap<Endpoint, Qdrant>>> = Mutex::new(None);
 
-struct CachedClient {
-    url: String,
-    api_key: Option<String>,
-    timeout_secs: u64,
-    client: Qdrant,
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Endpoint {
+    pub url: String,
+    pub api_key: Option<String>,
+    pub timeout_secs: u64,
 }
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -30,38 +36,59 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 
 pub fn block_on<F, T>(future: F) -> T
 where
-    F: std::future::Future<Output = T>,
+    F: Future<Output = T>,
 {
     runtime().block_on(future)
 }
 
-/// Return a client for this endpoint. The api key stays in memory and is not logged.
-pub fn client(url: &str, api_key: Option<&str>, timeout_secs: u64) -> Result<Qdrant, String> {
-    let mut guard = CLIENT
+pub fn client(endpoint: &Endpoint) -> Result<Qdrant, String> {
+    let mut guard = CLIENTS
         .lock()
         .map_err(|_| "qdrant client lock poisoned".to_string())?;
-    let reuse = guard.as_ref().is_some_and(|cached| {
-        cached.url == url
-            && cached.api_key.as_deref() == api_key
-            && cached.timeout_secs == timeout_secs
-    });
-    if !reuse {
-        let mut builder = Qdrant::from_url(url).timeout(Duration::from_secs(timeout_secs));
-        if let Some(key) = api_key {
-            builder = builder.api_key(key.to_string());
-        }
-        let client = builder
-            .build()
-            .map_err(|err| format!("qdrant connect to {url} failed: {err}"))?;
-        *guard = Some(CachedClient {
-            url: url.to_string(),
-            api_key: api_key.map(str::to_string),
-            timeout_secs,
-            client,
-        });
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if let Some(existing) = cache.get(endpoint) {
+        return Ok(existing.clone());
     }
-    let cached = guard
-        .as_ref()
-        .ok_or_else(|| "qdrant client missing after connect".to_string())?;
-    Ok(cached.client.clone())
+    if cache.len() >= CACHE_LIMIT
+        && let Some(stale) = cache.keys().next().cloned()
+    {
+        cache.remove(&stale);
+    }
+    let mut builder =
+        Qdrant::from_url(&endpoint.url).timeout(Duration::from_secs(endpoint.timeout_secs));
+    if let Some(key) = &endpoint.api_key {
+        builder = builder.api_key(key.clone());
+    }
+    let client = builder.build().map_err(|err| {
+        format!(
+            "qdrant connect to {} failed: {}",
+            endpoint.url,
+            explain(err)
+        )
+    })?;
+    cache.insert(endpoint.clone(), client.clone());
+    Ok(client)
+}
+
+/// Run a Qdrant call up to three times when the failure is a transient gRPC status.
+pub fn retry<T, F, Fut>(mut operation: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, QdrantError>>,
+{
+    block_on(async move {
+        let mut delay = Duration::from_millis(50);
+        let mut attempt = 0;
+        loop {
+            match operation().await {
+                Ok(value) => return Ok(value),
+                Err(err) if is_transient(&err) && attempt < 2 => {
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                Err(err) => return Err(explain(err)),
+            }
+        }
+    })
 }

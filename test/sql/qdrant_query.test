@@ -1,10 +1,22 @@
 # name: test/sql/qdrant_query.test
-# description: qdrant_query is registered
+# description: qdrant table functions are registered
 # group: [qdrant]
 
 require qdrant
 
 query I
-SELECT count(*) FROM duckdb_functions() WHERE function_name = 'qdrant_query';
+SELECT count(*) FROM duckdb_functions()
+WHERE function_name IN (
+    'qdrant_query',
+    'qdrant_hybrid',
+    'qdrant_recommend',
+    'qdrant_discover',
+    'qdrant_context',
+    'qdrant_scroll',
+    'qdrant_collections',
+    'qdrant_collection_info',
+    'qdrant_upsert',
+    'qdrant_upsert_one'
+);
 ----
-1
+10

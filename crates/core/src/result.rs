@@ -13,6 +13,23 @@ pub struct QueryRow {
     pub payload: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScrollRow {
+    pub id: String,
+    pub payload: String,
+}
+
+pub fn scored_rows(points: Vec<ScoredPoint>) -> Result<Vec<QueryRow>, String> {
+    points.into_iter().map(scored_point_row).collect()
+}
+
+pub fn retrieved_row(point: qdrant_client::qdrant::RetrievedPoint) -> Result<ScrollRow, String> {
+    Ok(ScrollRow {
+        id: point_id(&point.id)?,
+        payload: payload_json(&point.payload)?,
+    })
+}
+
 pub fn scored_point_row(point: ScoredPoint) -> Result<QueryRow, String> {
     Ok(QueryRow {
         id: point_id(&point.id)?,
