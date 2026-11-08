@@ -1,0 +1,10 @@
+# name: test/sql/qdrant_query.test
+# description: qdrant_query is registered
+# group: [qdrant]
+
+require qdrant
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'qdrant_query';
+----
+1

@@ -1,7 +1,10 @@
 [package]
-name = "rusty_quack_core"
+name = "qdrant_core"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 duckdb-neo.workspace = true
+qdrant-client = "=1.20.0"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }

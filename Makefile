@@ -2,7 +2,7 @@
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-EXTENSION_NAME=rusty_quack
+EXTENSION_NAME=qdrant
 
 # Mark the extension as C_STRUCT_UNSTABLE: DuckDB 2.x requires the _init_c_api_v2 entrypoint.
 # Binaries load only in the exact TARGET_DUCKDB_VERSION, not in newer DuckDB releases.
@@ -21,9 +21,9 @@ include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 # Build workspace libraries rather than the CI tools' Wasm example target.
 IS_EXAMPLE=
 ifneq ($(DUCKDB_WASM_PLATFORM),)
-	TARGET_INFO=--target $(TARGET) --package rusty_quack_wasm
+	TARGET_INFO=--target $(TARGET) --package qdrant_wasm
 else
-	TARGET_INFO+=--package rusty_quack
+	TARGET_INFO+=--package qdrant
 endif
 
 configure: venv platform extension_version
