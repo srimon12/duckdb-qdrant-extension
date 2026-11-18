@@ -4,21 +4,26 @@
 use std::time::Duration;
 
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, Distance, NamedVectors, PointStruct, SparseVectorParamsBuilder,
-    SparseVectorsConfigBuilder, VectorParamsBuilder, VectorsConfigBuilder,
+    CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, Distance, FieldType, Fusion,
+    NamedVectors, PointStruct, RecommendStrategy, SparseVectorParamsBuilder,
+    SparseVectorsConfigBuilder, TextIndexParamsBuilder, TokenizerType, VectorParamsBuilder,
+    VectorsConfigBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
 
+use crate::batch::run_batch;
 use crate::client::{Endpoint, block_on};
 use crate::collections::list_collections;
 use crate::discover::run_discover;
-use crate::hybrid::run_hybrid;
+use crate::hybrid::{run_hybrid, run_hybrid_text};
 use crate::query::run_nearest;
 use crate::recommend::run_recommend;
-use crate::scroll::run_scroll;
+use crate::scroll::{ScrollRequest, run_scroll};
+use crate::text::run_text;
 use crate::types::{
-    DiscoverRequest, Fusion, HybridRequest, QueryRequest, RecommendRequest, RecommendStrategy,
-    Scope, SparseVector, parse_context_pairs, parse_filter,
+    BatchMode, BatchRequest, DiscoverRequest, HybridRequest, HybridTextRequest, QueryRequest,
+    RecommendRequest, Scope, SparseVector, TextRequest, batch_limit, parse_batch_queries,
+    parse_context_pairs, parse_filter,
 };
 use crate::upsert::{UpsertBind, upsert_batch};
 
@@ -96,16 +101,48 @@ fn live(endpoint: &Endpoint) -> Result<(), String> {
     .map_err(|err| err.to_string())?;
 
     let points = [
-        (0u64, [1.0, 0.0, 0.0, 0.0], vec![1u32], vec![1.0], 2020),
-        (1, [0.0, 1.0, 0.0, 0.0], vec![2], vec![1.0], 2024),
-        (2, [0.0, 0.0, 1.0, 0.0], vec![1, 2], vec![0.2, 0.8], 2024),
-        (3, [0.9, 0.1, 0.0, 0.0], vec![1], vec![0.4], 2024),
+        (
+            0u64,
+            [1.0, 0.0, 0.0, 0.0],
+            vec![1u32],
+            vec![1.0],
+            2020,
+            "cashew granola bars",
+        ),
+        (
+            1,
+            [0.0, 1.0, 0.0, 0.0],
+            vec![2],
+            vec![1.0],
+            2024,
+            "granola bars cashew",
+        ),
+        (
+            2,
+            [0.0, 0.0, 1.0, 0.0],
+            vec![1, 2],
+            vec![0.2, 0.8],
+            2024,
+            "granola cashew mix",
+        ),
+        (
+            3,
+            [0.9, 0.1, 0.0, 0.0],
+            vec![1],
+            vec![0.4],
+            2024,
+            "cashew granola snack",
+        ),
     ];
     let upserted = points
         .into_iter()
-        .map(|(id, dense, indices, values, year)| {
-            let payload = Payload::try_from(serde_json::json!({"year": year, "color": "red"}))
-                .map_err(|err| err.to_string())?;
+        .map(|(id, dense, indices, values, year, body)| {
+            let payload = Payload::try_from(serde_json::json!({
+                "year": year,
+                "color": "red",
+                "body": body
+            }))
+            .map_err(|err| err.to_string())?;
             Ok(PointStruct::new(
                 id,
                 NamedVectors::default()
@@ -127,10 +164,39 @@ fn live(endpoint: &Endpoint) -> Result<(), String> {
     })
     .map_err(|err| err.to_string())?;
 
+    block_on(async {
+        client
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(name.clone(), "body", FieldType::Text)
+                    .field_index_params(
+                        TextIndexParamsBuilder::new(TokenizerType::Word)
+                            .bm25_scoring()
+                            .build(),
+                    )
+                    .wait(true),
+            )
+            .await
+    })
+    .map_err(|err| err.to_string())?;
+
+    let bm25 = (Some(1.5_f32), Some(0.5_f32));
+    let mut text_scope = scope(endpoint, &name, 2);
+    text_scope.using = Some("body".to_string());
+    let text_rows = run_text(&TextRequest {
+        scope: text_scope.clone(),
+        text: "cashew granola".to_string(),
+        k: bm25.0,
+        b: bm25.1,
+    })?;
+    assert!(
+        !text_rows.is_empty(),
+        "BM25 over the body index should match every point"
+    );
+
     let mut nearest_scope = scope(endpoint, &name, 2);
     nearest_scope.using = Some("dense".to_string());
     let nearest = run_nearest(&QueryRequest {
-        scope: nearest_scope,
+        scope: nearest_scope.clone(),
         vector: vec![1.0, 0.0, 0.0, 0.0],
     })?;
     assert_eq!(nearest[0].id, "0", "closest dense point should be id 0");
@@ -139,6 +205,88 @@ fn live(endpoint: &Endpoint) -> Result<(), String> {
         "{}",
         nearest[0].payload
     );
+
+    let dense_queries = parse_batch_queries(
+        "[[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0]]",
+        BatchMode::Dense,
+        None,
+        None,
+    )?;
+    let dense_vectors = [vec![1.0_f32, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
+    let dense_batch = run_batch(&BatchRequest {
+        scope: nearest_scope.clone(),
+        queries: dense_queries.clone(),
+    })?;
+    for (query_index, vector) in dense_vectors.iter().enumerate() {
+        let batched: Vec<(String, f64)> = dense_batch
+            .iter()
+            .filter(|row| row.query_index == query_index as u64)
+            .map(|row| (row.id.clone(), row.score))
+            .collect();
+        let single = run_nearest(&QueryRequest {
+            scope: nearest_scope.clone(),
+            vector: vector.clone(),
+        })?;
+        let single_rows: Vec<(String, f64)> = single
+            .iter()
+            .map(|row| (row.id.clone(), row.score))
+            .collect();
+        assert_eq!(batched, single_rows, "batch must match one query per call");
+    }
+    assert_eq!(
+        dense_batch
+            .iter()
+            .find(|row| row.query_index == 0)
+            .map(|row| row.id.as_str()),
+        Some("0")
+    );
+
+    let mut text_batch_scope = scope(endpoint, &name, 2);
+    text_batch_scope.using = Some("body".to_string());
+    let text_batch = run_batch(&BatchRequest {
+        scope: text_batch_scope,
+        queries: parse_batch_queries(
+            r#"["cashew granola","cashew"]"#,
+            BatchMode::Text,
+            bm25.0,
+            bm25.1,
+        )?,
+    })?;
+    let batch_text: Vec<(String, f64)> = text_batch
+        .iter()
+        .filter(|row| row.query_index == 0)
+        .map(|row| (row.id.clone(), row.score))
+        .collect();
+    let single_text: Vec<(String, f64)> = text_rows
+        .iter()
+        .map(|row| (row.id.clone(), row.score))
+        .collect();
+    assert_eq!(
+        batch_text, single_text,
+        "text batch must match qdrant_text with the same k/b"
+    );
+
+    let hybrid_text = run_hybrid_text(&HybridTextRequest {
+        scope: scope(endpoint, &name, 2),
+        dense: vec![1.0, 0.0, 0.0, 0.0],
+        dense_using: Some("dense".to_string()),
+        text: "cashew granola".to_string(),
+        text_field: "body".to_string(),
+        fusion: Fusion::Rrf,
+        prefetch_limit: 10,
+    })?;
+    assert!(
+        !hybrid_text.is_empty(),
+        "dense + text hybrid must return rows"
+    );
+
+    let too_many = run_batch(&BatchRequest {
+        scope: scope(endpoint, &name, 130),
+        queries: dense_queries,
+    });
+    let too_many = too_many.expect_err("a batch limit above 128 must fail");
+    assert!(too_many.contains("128"), "{too_many}");
+    assert!(batch_limit(130).unwrap_err().contains("130"));
 
     let mut filtered = scope(endpoint, &name, 4);
     filtered.using = Some("dense".to_string());
@@ -234,12 +382,17 @@ fn live(endpoint: &Endpoint) -> Result<(), String> {
     assert!(!context_rows.is_empty());
 
     let mut scroll_scope = scope(endpoint, &name, 10);
-    let scrolled = run_scroll(&scroll_scope)?;
+    let scrolled = run_scroll(&ScrollRequest {
+        scope: scroll_scope.clone(),
+        offset: None,
+    })?;
     assert_eq!(scrolled.len(), 4);
     scroll_scope.limit = 2;
     let start = scrolled[1].id.clone();
-    scroll_scope.using = Some(start.clone());
-    let page = run_scroll(&scroll_scope)?;
+    let page = run_scroll(&ScrollRequest {
+        scope: scroll_scope,
+        offset: Some(start.clone()),
+    })?;
     assert!(
         page.iter().all(|row| row.id.as_str() >= start.as_str()),
         "scroll offset should not return ids before {start}: {page:?}"
@@ -260,8 +413,9 @@ fn live(endpoint: &Endpoint) -> Result<(), String> {
     let mut many_payloads = Vec::new();
     for index in 0..130 {
         many_ids.push(format!("{}", 100 + index));
-        many_vectors.push(vec![0.01, 0.0, 0.0, index as f32 / 130.0]);
-        many_payloads.push(r#"{"year":2024}"#.to_string());
+        // Distinct dense scores keep the fused order stable across pages.
+        many_vectors.push(vec![1.0 - index as f32 / 260.0, 0.0, 0.0, 0.0]);
+        many_payloads.push(format!(r#"{{"year":2024,"body":"bulk item {index}"}}"#));
     }
     upsert_batch(&UpsertBind {
         collection: name.clone(),
@@ -277,7 +431,52 @@ fn live(endpoint: &Endpoint) -> Result<(), String> {
         scope: paged,
         vector: vec![1.0, 0.0, 0.0, 0.0],
     })?;
-    assert_eq!(paged_rows.len(), 130, "large limits must cross the 128-row page");
+    assert_eq!(
+        paged_rows.len(),
+        130,
+        "large limits must cross the 128-row page"
+    );
+
+    let hybrid_paged = run_hybrid_text(&HybridTextRequest {
+        scope: scope(endpoint, &name, 130),
+        dense: vec![1.0, 0.0, 0.0, 0.0],
+        dense_using: Some("dense".to_string()),
+        // Only the four original points carry `cashew`, so the text leg is small
+        // and the fused order is stable at the page boundary.
+        text: "cashew".to_string(),
+        text_field: "body".to_string(),
+        fusion: Fusion::Rrf,
+        prefetch_limit: 100,
+    })?;
+    let distinct: std::collections::HashSet<&str> =
+        hybrid_paged.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(
+        (hybrid_paged.len(), distinct.len()),
+        (130, 130),
+        "hybrid paging must return 130 distinct rows, not a repeated page"
+    );
+
+    let hybrid_legs_paged = run_hybrid(&HybridRequest {
+        scope: scope(endpoint, &name, 130),
+        dense: vec![1.0, 0.0, 0.0, 0.0],
+        dense_using: Some("dense".to_string()),
+        sparse: SparseVector {
+            indices: vec![1],
+            values: vec![1.0],
+        },
+        sparse_using: "sparse".to_string(),
+        fusion: Fusion::Rrf,
+        prefetch_limit: 100,
+    })?;
+    let distinct_legs: std::collections::HashSet<&str> = hybrid_legs_paged
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect();
+    assert_eq!(
+        (hybrid_legs_paged.len(), distinct_legs.len()),
+        (130, 130),
+        "dense + sparse paging must return 130 distinct rows"
+    );
 
     let status = upsert_batch(&UpsertBind {
         collection: name.clone(),

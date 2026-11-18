@@ -6,11 +6,10 @@
 
 use qdrant_client::qdrant::with_payload_selector::SelectorOptions;
 use qdrant_client::qdrant::{
-    Condition, ContextInputBuilder, DiscoverInputBuilder, Filter, MinShould,
-    PayloadIncludeSelector, PointId, PrefetchQueryBuilder, Query, QueryPointsBuilder, Range,
-    RecommendInputBuilder, VectorInput,
+    Condition, ContextInputBuilder, DiscoverInputBuilder, Filter, Fusion, MinShould,
+    PayloadIncludeSelector, PointId, PrefetchQueryBuilder, Query, QueryPoints, QueryPointsBuilder,
+    Range, RecommendInputBuilder, RecommendStrategy, TextQueryBuilder, VectorInput, query,
 };
-pub use qdrant_client::qdrant::{Fusion, RecommendStrategy};
 use serde_json::Value;
 
 use crate::client::Endpoint;
@@ -47,6 +46,38 @@ pub struct HybridRequest {
     pub sparse_using: String,
     pub fusion: Fusion,
     pub prefetch_limit: u64,
+}
+
+#[derive(Clone)]
+pub struct TextRequest {
+    pub scope: Scope,
+    pub text: String,
+    pub k: Option<f32>,
+    pub b: Option<f32>,
+}
+
+#[derive(Clone)]
+pub struct HybridTextRequest {
+    pub scope: Scope,
+    pub dense: Vec<f32>,
+    pub dense_using: Option<String>,
+    pub text: String,
+    pub text_field: String,
+    pub fusion: Fusion,
+    pub prefetch_limit: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchMode {
+    Dense,
+    Text,
+}
+
+/// One `query_batch` call: every query carries the same scope and filter.
+#[derive(Clone)]
+pub struct BatchRequest {
+    pub scope: Scope,
+    pub queries: Vec<Query>,
 }
 
 #[derive(Clone)]
@@ -134,7 +165,128 @@ pub fn nearest_page(request: &QueryRequest, offset: u64, page: u64) -> QueryPoin
     .offset(offset)
 }
 
-pub fn hybrid_query(request: &HybridRequest) -> QueryPointsBuilder {
+pub fn text_page(request: &TextRequest, offset: u64, page: u64) -> QueryPointsBuilder {
+    decorate(
+        &request.scope,
+        QueryPointsBuilder::new(request.scope.collection.clone()).query(text_query(
+            &request.text,
+            request.k,
+            request.b,
+        )),
+    )
+    .limit(page)
+    .offset(offset)
+}
+
+pub fn text_query(text: &str, k: Option<f32>, b: Option<f32>) -> Query {
+    let mut builder = TextQueryBuilder::new(text.to_string());
+    if let Some(k) = k {
+        builder = builder.k(k);
+    }
+    if let Some(b) = b {
+        builder = builder.b(b);
+    }
+    Query {
+        variant: Some(query::Variant::Text(builder.build())),
+    }
+}
+
+pub fn hybrid_text_query(request: &HybridTextRequest, offset: u64) -> QueryPointsBuilder {
+    let mut dense = PrefetchQueryBuilder::default()
+        .query(Query::new_nearest(request.dense.clone()))
+        .limit(request.prefetch_limit);
+    if let Some(using) = &request.dense_using {
+        dense = dense.using(using.clone());
+    }
+    let text = PrefetchQueryBuilder::default()
+        .using(request.text_field.clone())
+        .query(text_query(&request.text, None, None))
+        .limit(request.prefetch_limit);
+    decorate(
+        &request.scope,
+        QueryPointsBuilder::new(request.scope.collection.clone())
+            .query(Query::new_fusion(request.fusion))
+            .add_prefetch(dense)
+            .add_prefetch(text),
+    )
+    .offset(offset)
+}
+
+pub fn parse_batch_mode(text: &str) -> Result<BatchMode, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "" | "dense" => Ok(BatchMode::Dense),
+        "text" => Ok(BatchMode::Text),
+        other => Err(format!("mode must be dense or text, got {other}")),
+    }
+}
+
+/// A batch call returns one page per query in v1, so a limit must fit in one page.
+pub fn batch_limit(limit: u64) -> Result<u64, String> {
+    if limit > PAGE_SIZE {
+        return Err(format!(
+            "limit {limit} is above {PAGE_SIZE}; qdrant_batch returns one page per query in v1"
+        ));
+    }
+    Ok(limit)
+}
+
+pub fn parse_batch_queries(
+    text: &str,
+    mode: BatchMode,
+    k: Option<f32>,
+    b: Option<f32>,
+) -> Result<Vec<Query>, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|err| format!("invalid queries JSON: {err}"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| "queries must be a JSON array".to_string())?;
+    if array.is_empty() {
+        return Err("queries is empty".to_string());
+    }
+    match mode {
+        BatchMode::Dense => array
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let vector = f32_array(item).map_err(|err| format!("query {index}: {err}"))?;
+                if vector.is_empty() {
+                    return Err(format!("query {index}: vector is empty"));
+                }
+                Ok(Query::new_nearest(vector))
+            })
+            .collect(),
+        BatchMode::Text => array
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let text = item
+                    .as_str()
+                    .ok_or_else(|| format!("query {index}: text queries must be JSON strings"))?;
+                if text.trim().is_empty() {
+                    return Err(format!("query {index}: text is empty"));
+                }
+                Ok(text_query(text, k, b))
+            })
+            .collect(),
+    }
+}
+
+/// One request per query. `scope.using` is the vector name, or the text field.
+pub fn batch_queries(scope: &Scope, queries: &[Query]) -> Vec<QueryPoints> {
+    queries
+        .iter()
+        .map(|query| {
+            decorate(
+                scope,
+                QueryPointsBuilder::new(scope.collection.clone()).query(query.clone()),
+            )
+            .build()
+        })
+        .collect()
+}
+
+pub fn hybrid_query(request: &HybridRequest, offset: u64) -> QueryPointsBuilder {
     let mut dense = PrefetchQueryBuilder::default()
         .query(Query::new_nearest(request.dense.clone()))
         .limit(request.prefetch_limit);
@@ -155,6 +307,7 @@ pub fn hybrid_query(request: &HybridRequest) -> QueryPointsBuilder {
             .add_prefetch(dense)
             .add_prefetch(sparse),
     )
+    .offset(offset)
 }
 
 pub fn recommend_query(request: &RecommendRequest) -> QueryPointsBuilder {
@@ -373,7 +526,11 @@ fn f32_array(value: &Value) -> Result<Vec<f32>, String> {
             if !number.is_finite() {
                 return Err(format!("value at index {index} is not finite"));
             }
-            Ok(number as f32)
+            let value = number as f32;
+            if !value.is_finite() {
+                return Err(format!("value at index {index} is out of range for f32"));
+            }
+            Ok(value)
         })
         .collect()
 }
@@ -627,6 +784,7 @@ fn point_ids(value: &Value) -> Result<Vec<PointId>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qdrant_client::qdrant::Bm25Params;
     use qdrant_client::qdrant::FieldCondition;
     use qdrant_client::qdrant::condition::ConditionOneOf;
 
@@ -680,6 +838,176 @@ mod tests {
             dense_vector(vec![Some(0.5), Some(-1.0)]).unwrap(),
             vec![0.5, -1.0]
         );
+    }
+
+    #[test]
+    fn text_page_names_the_field_and_sends_text() {
+        let request = TextRequest {
+            scope: Scope {
+                collection: "products".to_string(),
+                limit: 10,
+                filter: None,
+                using: Some("text".to_string()),
+                score_threshold: None,
+                with_payload: true,
+                payload_fields: None,
+                endpoint: crate::client::Endpoint {
+                    url: DEFAULT_URL.to_string(),
+                    api_key: None,
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                },
+            },
+            text: "cashew granola bars".to_string(),
+            k: Some(1.5),
+            b: Some(0.5),
+        };
+        let query = text_page(&request, 0, 10).build();
+        assert_eq!(query.collection_name, "products");
+        assert_eq!(query.using.as_deref(), Some("text"));
+        assert_eq!(query.limit, Some(10));
+        let Some(query::Variant::Text(text)) = query.query.and_then(|query| query.variant) else {
+            panic!("expected a text query");
+        };
+        assert_eq!(text.query, "cashew granola bars");
+        assert_eq!(
+            text.scoring,
+            Some(qdrant_client::qdrant::text_query::Scoring::Bm25(
+                Bm25Params {
+                    k: Some(1.5),
+                    b: Some(0.5),
+                }
+            ))
+        );
+    }
+
+    fn scope(limit: u64) -> Scope {
+        Scope {
+            collection: "products".to_string(),
+            limit,
+            filter: None,
+            using: None,
+            score_threshold: None,
+            with_payload: true,
+            payload_fields: None,
+            endpoint: crate::client::Endpoint {
+                url: DEFAULT_URL.to_string(),
+                api_key: None,
+                timeout_secs: DEFAULT_TIMEOUT_SECS,
+            },
+        }
+    }
+
+    #[test]
+    fn batch_dense_queries_parse_in_order() {
+        let queries =
+            parse_batch_queries("[[0.1,0.2],[0.3,0.4]]", BatchMode::Dense, None, None).unwrap();
+        assert_eq!(queries.len(), 2);
+        assert!(matches!(
+            queries[1].variant.as_ref(),
+            Some(query::Variant::Nearest(_))
+        ));
+
+        let mut scope = scope(3);
+        scope.using = Some("dense".to_string());
+        scope.filter = parse_filter(r#"{"must":[{"key":"year","range":{"gte":2024}}]}"#).unwrap();
+        let points = batch_queries(&scope, &queries);
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|point| {
+            point.filter.is_some()
+                && point.limit == Some(3)
+                && point.using.as_deref() == Some("dense")
+        }));
+    }
+
+    #[test]
+    fn batch_text_queries_carry_bm25_weights() {
+        let queries = parse_batch_queries(
+            r#"["granola","cashew"]"#,
+            BatchMode::Text,
+            Some(1.5),
+            Some(0.5),
+        )
+        .unwrap();
+        let Some(query::Variant::Text(text)) = queries[0].variant.as_ref() else {
+            panic!("expected a text query");
+        };
+        assert_eq!(text.query, "granola");
+        assert_eq!(
+            text.scoring,
+            Some(qdrant_client::qdrant::text_query::Scoring::Bm25(
+                Bm25Params {
+                    k: Some(1.5),
+                    b: Some(0.5),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn batch_rejects_bad_queries() {
+        assert!(
+            parse_batch_queries("[]", BatchMode::Dense, None, None)
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert!(
+            parse_batch_queries("{", BatchMode::Dense, None, None)
+                .unwrap_err()
+                .contains("invalid queries JSON")
+        );
+        assert!(parse_batch_queries(r#"[[1.0]]"#, BatchMode::Text, None, None).is_err());
+        assert!(
+            parse_batch_queries(r#"["a"," "]"#, BatchMode::Text, None, None)
+                .unwrap_err()
+                .contains("query 1")
+        );
+        assert!(
+            parse_batch_queries("[[1e400]]", BatchMode::Dense, None, None)
+                .unwrap_err()
+                .contains("invalid queries JSON")
+        );
+        assert!(
+            parse_batch_queries("[[1e300]]", BatchMode::Dense, None, None)
+                .unwrap_err()
+                .contains("out of range")
+        );
+        assert!(parse_batch_mode("sparse").unwrap_err().contains("sparse"));
+    }
+
+    #[test]
+    fn batch_limit_rejects_more_than_one_page() {
+        assert_eq!(batch_limit(PAGE_SIZE).unwrap(), PAGE_SIZE);
+        assert!(batch_limit(130).unwrap_err().contains("130"));
+    }
+
+    #[test]
+    fn hybrid_text_sends_dense_and_text_prefetches() {
+        let request = HybridTextRequest {
+            scope: scope(10),
+            dense: vec![0.1, 0.2],
+            dense_using: Some("dense".to_string()),
+            text: "granola".to_string(),
+            text_field: "text".to_string(),
+            fusion: Fusion::Rrf,
+            prefetch_limit: 100,
+        };
+        let query = hybrid_text_query(&request, 128).build();
+        assert_eq!(query.prefetch.len(), 2);
+        assert_eq!(query.prefetch[0].using.as_deref(), Some("dense"));
+        assert_eq!(query.prefetch[1].using.as_deref(), Some("text"));
+        assert_eq!(query.prefetch[1].limit, Some(100));
+        assert_eq!(query.offset, Some(128));
+        assert!(matches!(
+            query.prefetch[1]
+                .query
+                .as_ref()
+                .and_then(|query| query.variant.as_ref()),
+            Some(query::Variant::Text(_))
+        ));
+        assert!(matches!(
+            query.query.and_then(|query| query.variant),
+            Some(query::Variant::Fusion(_))
+        ));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use duckdb_neo::{Result, data_chunk::DataChunkRef};
 
-use crate::result::{QueryRow, ScrollRow};
+use crate::result::{BatchRow, QueryRow, ScrollRow};
 
 pub struct Fetched<T> {
     pub rows: Vec<T>,
@@ -66,6 +66,47 @@ pub fn write_scored(
     Ok(())
 }
 
+pub fn write_batch(
+    output: &mut DataChunkRef<'_>,
+    rows: &[BatchRow],
+    start: usize,
+    count: usize,
+) -> Result<()> {
+    {
+        let mut index = output.get_vector_at_mut::<i64>(0)?;
+        index.set_size(count)?;
+        let mut writer = index.writer()?;
+        for offset in 0..count {
+            writer.set(offset, Some(rows[start + offset].query_index as i64))?;
+        }
+    }
+    {
+        let mut id = output.get_vector_at_mut::<String>(1)?;
+        id.set_size(count)?;
+        let mut writer = id.writer()?;
+        for offset in 0..count {
+            writer.set(offset, Some(&rows[start + offset].id))?;
+        }
+    }
+    {
+        let mut score = output.get_vector_at_mut::<f64>(2)?;
+        score.set_size(count)?;
+        let mut writer = score.writer()?;
+        for offset in 0..count {
+            writer.set(offset, Some(rows[start + offset].score))?;
+        }
+    }
+    {
+        let mut payload = output.get_vector_at_mut::<String>(3)?;
+        payload.set_size(count)?;
+        let mut writer = payload.writer()?;
+        for offset in 0..count {
+            writer.set(offset, Some(&rows[start + offset].payload))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn write_scroll(
     output: &mut DataChunkRef<'_>,
     rows: &[ScrollRow],
@@ -100,4 +141,13 @@ pub fn declare_scored(
     bind_handle.add_result_column("score", &f64::logical_type(context)?)?;
     bind_handle.add_result_column("payload", &String::logical_type(context)?)?;
     Ok(())
+}
+
+pub fn declare_batch(
+    context: &duckdb_neo::connection::Context,
+    bind_handle: duckdb_neo::table_function::BindFunctionHandle<'_>,
+) -> Result<()> {
+    use duckdb_neo::DuckDBType;
+    bind_handle.add_result_column("query_index", &i64::logical_type(context)?)?;
+    declare_scored(context, bind_handle)
 }

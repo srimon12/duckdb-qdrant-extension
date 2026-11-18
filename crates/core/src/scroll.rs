@@ -31,10 +31,16 @@ use crate::types::{
 
 struct ScrollTable;
 
+/// A scroll is not a search. `offset` is a point id, not a vector name.
+pub(crate) struct ScrollRequest {
+    pub(crate) scope: Scope,
+    pub(crate) offset: Option<String>,
+}
+
 impl TableFunctionCallbacks for ScrollTable {
     type GlobalState = Mutex<Fetched<ScrollRow>>;
     type LocalState = ();
-    type BindData = Scope;
+    type BindData = ScrollRequest;
 
     fn init_global_state(
         &self,
@@ -67,7 +73,7 @@ impl TableFunctionCallbacks for ScrollTable {
         let limit = positive_limit(&arguments, 1, DEFAULT_LIMIT as i64)?;
         let filter = parse_filter(&optional_string(&arguments, 2)?).map_err(invalid)?;
         let offset_text = optional_string(&arguments, 3)?;
-        let using = if offset_text.is_empty() {
+        let offset = if offset_text.is_empty() {
             None
         } else {
             Some(offset_text)
@@ -83,15 +89,18 @@ impl TableFunctionCallbacks for ScrollTable {
                 other => other,
             },
         )?;
-        Ok(Scope {
-            collection,
-            limit,
-            filter,
-            using,
-            score_threshold: None,
-            with_payload: with_payload(context)?,
-            payload_fields,
-            endpoint,
+        Ok(ScrollRequest {
+            scope: Scope {
+                collection,
+                limit,
+                filter,
+                using: None,
+                score_threshold: None,
+                with_payload: with_payload(context)?,
+                payload_fields,
+                endpoint,
+            },
+            offset,
         })
     }
 
@@ -118,18 +127,20 @@ impl TableFunctionCallbacks for ScrollTable {
     }
 }
 
-pub fn run_scroll(scope: &Scope) -> std::result::Result<Vec<ScrollRow>, String> {
+pub fn run_scroll(request: &ScrollRequest) -> std::result::Result<Vec<ScrollRow>, String> {
+    let scope = &request.scope;
     let qdrant = client(&scope.endpoint)?;
     let mut rows = Vec::new();
-    let mut offset = scope
-        .using
+    let mut offset = request
+        .offset
         .clone()
         .map(|text| point_id_text(&text))
         .transpose()?;
     while (rows.len() as u64) < scope.limit {
         let size = (scope.limit - rows.len() as u64).min(PAGE_SIZE);
+        let page_limit = u32::try_from(size).unwrap_or(u32::MAX);
         let mut request = ScrollPointsBuilder::new(scope.collection.clone())
-            .limit(u32::try_from(size).unwrap_or(u32::MAX))
+            .limit(page_limit)
             .with_payload(payload_selector(
                 scope.with_payload,
                 scope.payload_fields.as_deref(),
@@ -182,10 +193,12 @@ pub fn register(extension: &Extension) -> Result<()> {
             .param(FunctionParameter::with_default("timeout_secs", 0_i64))
             .documentation(
                 FunctionDocumentationBuilder::new()
-                    .description("Scroll points from a collection. Returns id and payload JSON.")
+                    .description(
+                        "Phase 3. Walk points by id. Returns id and payload. offset is a point id.",
+                    )
                     .add_example(
                         "First 100",
-                        "SELECT * FROM qdrant_scroll(collection := 'articles', limit := 100)",
+                        "SELECT * FROM qdrant_scroll(collection := 'articles', \"limit\" := 100)",
                     )
                     .add_category(CATEGORY),
             ),

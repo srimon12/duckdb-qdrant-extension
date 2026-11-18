@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use qdrant_client::{Qdrant, QdrantError};
 
-use crate::error::{explain, is_transient};
+use crate::error::{CallError, explain, is_transient};
 
 const CACHE_LIMIT: usize = 8;
 
@@ -41,10 +41,11 @@ where
     runtime().block_on(future)
 }
 
-pub fn client(endpoint: &Endpoint) -> Result<Qdrant, String> {
+pub fn client(endpoint: &Endpoint) -> Result<Qdrant, CallError> {
+    // A poisoned lock must not abort the DuckDB process.
     let mut guard = CLIENTS
         .lock()
-        .map_err(|_| "qdrant client lock poisoned".to_string())?;
+        .map_err(|_| CallError::other("qdrant client lock poisoned"))?;
     let cache = guard.get_or_insert_with(HashMap::new);
     if let Some(existing) = cache.get(endpoint) {
         return Ok(existing.clone());
@@ -60,18 +61,18 @@ pub fn client(endpoint: &Endpoint) -> Result<Qdrant, String> {
         builder = builder.api_key(key.clone());
     }
     let client = builder.build().map_err(|err| {
-        format!(
+        CallError::other(format!(
             "qdrant connect to {} failed: {}",
             endpoint.url,
             explain(err)
-        )
+        ))
     })?;
     cache.insert(endpoint.clone(), client.clone());
     Ok(client)
 }
 
 /// Run a Qdrant call up to three times when the failure is a transient gRPC status.
-pub fn retry<T, F, Fut>(mut operation: F) -> Result<T, String>
+pub fn retry<T, F, Fut>(mut operation: F) -> Result<T, CallError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, QdrantError>>,
