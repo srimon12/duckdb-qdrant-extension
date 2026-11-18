@@ -8,11 +8,12 @@ the report comes from a query in this file or in demo/*.sql.
 Prerequisites, in order:
     demo/qdrant_setup.py           restore the snapshot
     demo/embed.py --limit 50       query vectors and generated SQL
+    make configure && make debug   build the extension
+    demo/local.sql                 local mirror with HNSW
     out/topk.sql                   dense batch run
     out/text_topk.sql              BM25 batch run
     out/hybrid.sql                 server-side hybrid run
     out/exact.sql                  exact scan
-    demo/local.sql                 local mirror with HNSW
 
 Run:
     configure/venv/Scripts/python.exe demo/report.py
@@ -76,15 +77,16 @@ def main():
     ).fetchall()
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    queries = runs[0][1] if runs else 0
     report = f"""# ESCI retrieval report
 
-Generated {now} from DuckDB demo/demo.duckdb and Qdrant at {args.url}.
+Generated {now} from DuckDB {args.db} and Qdrant at {args.url}.
 
 ## Collection
 
 Status `{info[0]}`, {info[1]} points, created at {info[2]}.
 
-## Runs, 50 judged queries
+## Runs, {queries} judged queries
 
 {table(runs, ["run", "queries", "nDCG@10"])}
 

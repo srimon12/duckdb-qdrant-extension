@@ -72,19 +72,8 @@ With a native Qdrant process, pass the host path instead, for example
 Expect `dense=384 Cosine` and a `text` payload index. The `text` index has
 BM25 scoring enabled; the script prints `scoring bm25` and says so explicitly,
 because `qdrant_text`, `qdrant_batch` text mode, and `qdrant_hybrid_text` need
-it.
-
-### Act 1: inspect what was restored
-
-```bash
-duckdb -unsigned demo/demo.duckdb \
-  -cmd "LOAD 'build/debug/extension/qdrant/qdrant.duckdb_extension';" \
-  -f demo/inspect.sql
-```
-
-This reads the collection back through SQL: status, point counts, segment count,
-`created_at`, and a three-row payload sample. The payload index list comes from
-the setup script above, which reads the REST `payload_schema`.
+it. Inspecting the restored collection comes after the extension build, in Act 1
+below.
 
 ## 3. Embed the evaluation queries
 
@@ -140,6 +129,19 @@ The DuckDB CLI v2.0.0 asset is
 
 The loadable file is
 `build/debug/extension/qdrant/qdrant.duckdb_extension`.
+
+### Act 1: inspect what was restored
+
+The extension must be built first. This reads the collection back through SQL:
+status, point counts, segment count, `created_at`, and a three-row payload
+sample. The payload index list comes from the setup script in step 2, which
+reads the REST `payload_schema`.
+
+```bash
+duckdb -unsigned demo/demo.duckdb \
+  -cmd "LOAD 'build/debug/extension/qdrant/qdrant.duckdb_extension';" \
+  -f demo/inspect.sql
+```
 
 ## 5. Load the local mirror and build HNSW
 
@@ -351,8 +353,8 @@ duckdb -unsigned -cmd "LOAD 'build/debug/extension/qdrant/qdrant.duckdb_extensio
 ```
 
 `demo/smoke.sql` binds and runs all three new functions, including fused paging
-(`"limit" := 150` returns 150 distinct ids). `demo/limit-error.sql` is the
-expected failure: a batch limit of 130 must print
+(`"limit" := 150` returned 150 distinct ids in the measured run).
+`demo/limit-error.sql` is the expected failure: a batch limit of 130 must print
 `limit 130 is above 128; qdrant_batch returns one page per query in v1`.
 
 ## Measured on Qdrant 1.20.2

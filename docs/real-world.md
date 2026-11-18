@@ -100,7 +100,7 @@ sparse model.
 | Batch queries, one shared filter | Yes, this change | `qdrant_batch`; dense or text, one page per query, limit at most 128 |
 | Recommend, discover, context | Yes | `qdrant_recommend`, `qdrant_discover`, `qdrant_context` |
 | Filters: match, range, nested, prefix, substring, min_should | Yes | Filter JSON; unknown keys error |
-| Score threshold, payload selection, paging past 128 | Yes | Same args on every search; hybrid fusions page with `offset` and a prefetch floor equal to the limit |
+| Score threshold, payload selection, paging past 128 | Yes | Same args on every search; hybrid fusions page with `offset` and a prefetch floor equal to the limit, stable in tests but not tie-ordered by contract |
 | Collection list and info | Yes | `created_at` included |
 | Scroll | Yes, payload only | No vectors, no bulk export |
 | Upsert | Frozen | Code and tests stay; not advertised as a loader, no new features |
@@ -366,8 +366,10 @@ identical `(query_id, id, score)` rows as 50 separate `qdrant_query` calls. That
 is one RPC against 50; the demo does not time it.
 
 Fused paging: `qdrant_hybrid_text` with `"limit" := 150` on esci-products
-returned 150 rows and 150 distinct ids. The fix that makes this work is a
-per-page `offset` on the fused query plus one prefetch pool for every page.
+returned 150 rows and 150 distinct ids. The fix is a per-page `offset` on the
+fused query plus one prefetch pool for every page. Results were stable in these
+tests; the order of fused score ties is not a Qdrant guarantee, so a tie on a
+page boundary can still repeat or skip a point.
 
 One finding from the run: DuckDB parses named arguments whose names are SQL
 keywords only when quoted. `"using"`, `"limit"`, and `"offset"` need quotes;

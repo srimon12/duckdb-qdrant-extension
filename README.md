@@ -73,7 +73,7 @@ Phase 2 is still a read. It adds the other universal-query forms, plus the contr
 - `qdrant_context` uses those pairs and has no target.
 - `score_threshold` drops weaker hits.
 - `payload_fields` keeps only the named payload keys. `[]` returns `{}`.
-- A limit above 128 is fetched in pages of 128, then streamed into DuckDB chunks. `qdrant_hybrid` pages the server-side fused result with `offset` and raises its prefetch floor to the requested limit, so the fused order does not shift between pages.
+- A limit above 128 is fetched in pages of 128, then streamed into DuckDB chunks. `qdrant_hybrid` pages the server-side fused result with `offset` and raises its prefetch floor to the requested limit. Results were stable in tests; Qdrant does not contractually guarantee the order of fused score ties across pages.
 
 ```sql
 SELECT id, score, payload->>'year'
@@ -192,8 +192,8 @@ FROM qdrant_hybrid_text(
 There is no sparse model and no sparse vector. `text_field` names the payload
 field, and that field needs the BM25 index above. The SQL fusion above stays
 useful when you want the two ranked lists in DuckDB. A `limit` above 128 is
-paged with `offset`, and the prefetch floor rises to the requested limit so the
-fused order stays stable.
+paged with `offset`, and the prefetch floor rises to the requested limit. Results
+were stable in tests; the order of fused score ties is not a Qdrant guarantee.
 
 #### Batch (Qdrant 1.20.2)
 

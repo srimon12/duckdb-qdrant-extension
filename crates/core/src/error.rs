@@ -8,8 +8,8 @@ use std::fmt;
 use qdrant_client::QdrantError;
 use tonic::Code;
 
-/// A failure a SQL caller can read. The kind is kept so classification does not
-/// depend on parsing the message.
+/// A failure a SQL caller can read. The kind is kept for the display and logging
+/// path; a gRPC status is still classified with a message hint for dimensions.
 #[derive(Debug)]
 pub struct CallError {
     kind: Kind,

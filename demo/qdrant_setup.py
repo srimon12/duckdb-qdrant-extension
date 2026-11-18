@@ -107,7 +107,6 @@ def main():
     )
     parser.add_argument("--api-key", default="")
     parser.add_argument("--wait", type=int, default=900, help="seconds to wait")
-    parser.add_argument("--force", action="store_true", help="recover over a non-empty collection")
     parser.add_argument("--skip-recover", action="store_true")
     args = parser.parse_args()
 
@@ -115,10 +114,10 @@ def main():
     wait_ready(base, args.api_key, 120)
     info = existing(base, args.collection, args.api_key)
 
-    if info and info.get("points_count") and not args.force:
+    if info and info.get("points_count"):
         print(f"collection {args.collection!r} already has {info['points_count']} points")
         summary(info)
-        print("pass --force to recover the snapshot again")
+        print("not recovering over a non-empty collection; delete it first to restore again")
         return
 
     if not args.skip_recover:

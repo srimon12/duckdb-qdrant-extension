@@ -66,7 +66,7 @@ qdrant_batch(
   b := 0.75,                            -- text mode
   "limit" := 10,
   filter := '',
-  score_threshold := NaN,
+  score_threshold := 'NaN',
   payload_fields := '',
   url := '', api_key := '', timeout_secs := 0
 )
@@ -96,7 +96,7 @@ qdrant_hybrid_text(
   text_field := 'text',
   prefetch_limit := 100,
   "limit" := 10,
-  filter := '', score_threshold := NaN, payload_fields := '',
+  filter := '', score_threshold := 'NaN', payload_fields := '',
   url := '', api_key := '', timeout_secs := 0
 )
 ```
@@ -196,4 +196,6 @@ not depend on it. Parity, overhead, and cross-engine fusion are the bench's job.
   Implemented as an `invalid_input` error before the RPC.
 - `qdrant_hybrid_text` paging: it matches `qdrant_hybrid`. Both now set `offset`
   on the fused query and use one prefetch pool for every page, so `limit` above
-  128 returns distinct rows. Verified in the live test with 130 rows.
+  128 returns distinct rows. Verified in the live test with 130 rows. Ties in the
+  fused score are not ordered by contract, so a tie at a page boundary is not
+  covered by that guarantee.

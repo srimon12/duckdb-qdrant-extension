@@ -74,4 +74,4 @@ SELECT * FROM qdrant_context(
 
 Qdrant returns one page per RPC. This extension asks for at most 128 hits per RPC and repeats with `offset` until `limit` is filled or a page comes back short. DuckDB then reads those rows in its own chunks. You do not pass the page size.
 
-`qdrant_hybrid` and `qdrant_hybrid_text` follow the same rule. The fused result is paged with `offset`, and the prefetch floor is the requested `limit`, so every page is scored against the same candidate pool. Without that floor, the fused order would shift between pages and ids would repeat.
+`qdrant_hybrid` and `qdrant_hybrid_text` follow the same rule. The fused result is paged with `offset`, and the prefetch floor is the requested `limit`, so every page is scored against the same candidate pool. Results were stable in tests. Qdrant does not promise an order for fused score ties, so a tie that lands on a page boundary can still repeat or skip a point.

@@ -3,7 +3,7 @@
 -- result quality matters.
 --
 -- Prerequisites: Qdrant at the session qdrant_url with the demo collection
--- (384-dimensional unnamed dense vector `dense`, BM25 `text` payload index).
+-- (384-dimensional named dense vector `dense`, BM25 `text` payload index).
 --
 --   duckdb -unsigned -cmd "LOAD 'build/debug/extension/qdrant/qdrant.duckdb_extension'; SET qdrant_url='http://127.0.0.1:6334';" -f demo/smoke.sql
 --
