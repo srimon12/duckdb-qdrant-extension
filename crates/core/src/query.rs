@@ -165,7 +165,7 @@ pub fn register(extension: &Extension) -> Result<()> {
                     )
                     .add_example(
                         "Nearest 50",
-                        "SELECT * FROM qdrant_query(collection := 'articles', query := [0.1, 0.2, 0.3]::DOUBLE[], limit := 50)",
+                        "SELECT * FROM qdrant_query(collection := 'articles', query := [0.1, 0.2, 0.3]::DOUBLE[], \"limit\" := 50)",
                     )
                     .add_category(CATEGORY),
             ),

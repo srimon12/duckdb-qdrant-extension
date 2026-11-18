@@ -19,6 +19,14 @@ pub struct ScrollRow {
     pub payload: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchRow {
+    pub query_index: u64,
+    pub id: String,
+    pub score: f64,
+    pub payload: String,
+}
+
 pub fn scored_rows(points: Vec<ScoredPoint>) -> Result<Vec<QueryRow>, String> {
     points.into_iter().map(scored_point_row).collect()
 }

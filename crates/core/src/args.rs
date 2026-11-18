@@ -69,6 +69,13 @@ pub fn score_threshold(arguments: &[BindArgument], index: usize) -> Result<Optio
         .map(|value| value as f32))
 }
 
+/// A BM25 `k` or `b`. `NaN` and 0 mean "send no value", so Qdrant keeps its default.
+pub fn bm25_weight(arguments: &[BindArgument], index: usize) -> Result<Option<f32>> {
+    Ok(optional_f64(arguments, index)?
+        .filter(|value| value.is_finite() && *value != 0.0)
+        .map(|value| value as f32))
+}
+
 pub fn required_vector(arguments: &[BindArgument], index: usize, name: &str) -> Result<Vec<f32>> {
     dense_vector(number_list(arguments, index, name)?).map_err(invalid)
 }

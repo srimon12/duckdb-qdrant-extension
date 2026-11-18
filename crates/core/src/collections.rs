@@ -41,6 +41,7 @@ struct InfoRow {
     points_count: i64,
     indexed_vectors_count: i64,
     segments_count: i64,
+    created_at: Option<String>,
 }
 
 struct ListTable;
@@ -161,6 +162,7 @@ impl TableFunctionCallbacks for InfoTable {
         bind_handle.add_result_column("points_count", &i64::logical_type(context)?)?;
         bind_handle.add_result_column("indexed_vectors_count", &i64::logical_type(context)?)?;
         bind_handle.add_result_column("segments_count", &i64::logical_type(context)?)?;
+        bind_handle.add_result_column("created_at", &String::logical_type(context)?)?;
         Ok(InfoBind {
             name: required_string(&arguments, 0, "collection")?,
             endpoint: connection_args(context, &arguments, 1)?,
@@ -202,6 +204,14 @@ impl TableFunctionCallbacks for InfoTable {
         write_i64(&mut output, 3, count, start, &scan.rows, |row| {
             row.segments_count
         })?;
+        {
+            let mut column = output.get_vector_at_mut::<String>(4)?;
+            column.set_size(count)?;
+            let mut writer = column.writer()?;
+            for index in 0..count {
+                writer.set(index, scan.rows[start + index].created_at.as_deref())?;
+            }
+        }
         scan.next = end;
         Ok(())
     }
@@ -261,7 +271,43 @@ fn collection_info(bind: &InfoBind) -> std::result::Result<Vec<InfoRow>, String>
         points_count: info.points_count.unwrap_or(0) as i64,
         indexed_vectors_count: info.indexed_vectors_count.unwrap_or(0) as i64,
         segments_count: info.segments_count as i64,
+        created_at: info
+            .created_at
+            .as_ref()
+            .map(|ts| rfc3339_utc(ts.seconds, ts.nanos)),
     }])
+}
+
+/// Format a UTC timestamp. Qdrant 1.20 records `created_at` on the collection.
+fn rfc3339_utc(seconds: i64, _nanos: i32) -> String {
+    if seconds < 0 {
+        return format!("{seconds}");
+    }
+    let days = seconds.div_euclid(86_400);
+    let tod = seconds.rem_euclid(86_400) as u32;
+    let (year, month, day) = civil_from_days(days);
+    let hour = tod / 3600;
+    let minute = (tod % 3600) / 60;
+    let second = tod % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let month_part = (5 * doy + 2) / 153;
+    let day = doy - (153 * month_part + 2) / 5 + 1;
+    let month = if month_part < 10 {
+        month_part + 3
+    } else {
+        month_part - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year as i32, month as u32, day as u32)
 }
 
 fn connection_signature(signature: SignatureBuilder) -> SignatureBuilder {
@@ -290,7 +336,9 @@ pub fn register(extension: &Extension) -> Result<()> {
         )
         .documentation(
             FunctionDocumentationBuilder::new()
-                .description("Status and point counts for one collection.")
+                .description(
+                    "Phase 3. Status, point counts, and created_at for one collection. Not a search.",
+                )
                 .add_example(
                     "Articles",
                     "SELECT * FROM qdrant_collection_info(collection := 'articles')",
@@ -300,4 +348,15 @@ pub fn register(extension: &Extension) -> Result<()> {
         InfoTable,
     )
     .register(extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rfc3339_utc;
+
+    #[test]
+    fn unix_epoch_is_rfc3339() {
+        assert_eq!(rfc3339_utc(0, 0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_700_000_000, 0), "2023-11-14T22:13:20Z");
+    }
 }

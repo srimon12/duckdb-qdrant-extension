@@ -5,3 +5,9 @@ configure
 duckdb_unittest_tempdir
 /test/bin
 venv
+/demo/qdrant_storage
+/demo/snapshots
+/demo/demo.duckdb
+/demo/demo.duckdb.wal
+/out
+__pycache__/
