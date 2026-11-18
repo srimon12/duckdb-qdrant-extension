@@ -138,7 +138,7 @@ pub fn run_scroll(request: &ScrollRequest) -> std::result::Result<Vec<ScrollRow>
         .transpose()?;
     while (rows.len() as u64) < scope.limit {
         let size = (scope.limit - rows.len() as u64).min(PAGE_SIZE);
-        let page_limit = u32::try_from(size).expect("scroll page size fits in u32");
+        let page_limit = u32::try_from(size).unwrap_or(u32::MAX);
         let mut request = ScrollPointsBuilder::new(scope.collection.clone())
             .limit(page_limit)
             .with_payload(payload_selector(

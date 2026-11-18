@@ -78,12 +78,21 @@ impl TableFunctionCallbacks for BatchTable {
         let b = bm25_weight(&arguments, 6)?;
         let limit =
             batch_limit(positive_limit(&arguments, 7, DEFAULT_LIMIT as i64)?).map_err(invalid)?;
+        if mode == BatchMode::Text && !using_text.is_empty() {
+            return Err(invalid(
+                "using names a dense vector; text mode uses field".to_string(),
+            ));
+        }
+        if mode == BatchMode::Dense && !field_text.is_empty() && field_text != "text" {
+            return Err(invalid(
+                "field names a text payload field; dense mode uses using".to_string(),
+            ));
+        }
         let field = if field_text.is_empty() {
             "text".to_string()
         } else {
             field_text
         };
-        // A text query names the payload field in `using`, like `qdrant_text`.
         let using = match mode {
             BatchMode::Text => Some(field),
             BatchMode::Dense if using_text.is_empty() => None,
@@ -189,7 +198,7 @@ pub fn register(extension: &Extension) -> Result<()> {
             .documentation(
                 FunctionDocumentationBuilder::new()
                     .description(
-                        "Many queries in one Qdrant query_batch RPC with one shared filter. mode is dense or text. Returns query_index, id, score, and payload JSON. limit is at most 128.",
+                        "Many queries in one Qdrant query_batch RPC with one shared filter. mode is dense or text. Returns query_index, id, score, and payload JSON. limit is at most 128. A query with no hits adds no rows.",
                     )
                     .add_example(
                         "Two dense queries",

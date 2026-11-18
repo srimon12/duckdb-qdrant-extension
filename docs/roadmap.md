@@ -3,9 +3,16 @@
 Status: implemented on `feat/1.20.2-batch-hybrid-demo`. The decisions below are
 the ones the code follows; where implementation differs, the note is inline.
 
-Implemented in this PR: `qdrant_text` k/b, `qdrant_batch`, `qdrant_hybrid_text`,
-unit and live tests, the demo rewrite of the 50-query runs, and README/docs
-updates. Not implemented: deep batch pages (limit above 128), the H&M act, and
+Implemented in this PR besides the two P0 items and hybrid text:
+
+- `qdrant_collection_info` returns `created_at` (Qdrant 1.20); a timestamp before
+  the Unix epoch is NULL.
+- The `CallError` refactor: failures are classified, the API key never enters a
+  message, and transient gRPC statuses are retried once per call policy.
+- The scroll refactor: payload-only rows, id cursor, 128-point pages.
+- The ESCI demo, docs, unit tests, and the extended live test.
+
+Not implemented: deep batch pages (limit above 128), the H&M act, and
 everything in the freeze and never lists.
 
 ## Position
@@ -40,7 +47,7 @@ Those stay in Qdrant. The demo shows them through the Qdrant API/UI next to SQL.
 qdrant_text(..., "limit" := 10, k := 1.2, b := 0.75)
 ```
 
-Append `k` and `b` at the end of the signature. `NaN` or 0 keeps the server
+Append `k` and `b` at the end of the signature. `'NaN'` or 0 keeps the server
 default. `TextQueryBuilder::new(text).k(k).b(b)`.
 
 ## P0: one batch function
@@ -101,9 +108,10 @@ demo.
 ## P1: tests
 
 - Unit: batch JSON parsing (dense/text), limit > 128 rejection, text k/b placed
-  on the request, hybrid text prefetch shape.
+  on the request, hybrid text prefetch shape and offset, negative `created_at`.
 - Live (`QDRANT_TEST_URL`): batch dense and text parity against single-query
-  calls; hybrid text returns rows; 130-row page limit error; `qdrant_text` k/b.
+  calls on `(id, score)` with the same k/b; hybrid text returns rows; fused
+  paging to 130 distinct rows; 130-row page limit error; `qdrant_text` k/b.
 - Existing live test must keep passing.
 
 ## Demo: One SQL session
@@ -132,15 +140,26 @@ Bench integration: none. The demo is self-contained and must not import
 
 Deliverables:
 
-- `demo/README.md` with one run path and prerequisites.
+- `demo/README.md` with one run path and prerequisites. Done.
 - SQL files, `demo/embed.py` for query vectors, `demo/report.py` for a static
-  HTML/Markdown report from SQL results.
+  HTML/Markdown report from SQL results. Done; the report is `out/report.md`.
 - Re-run the measured numbers on 1.20.2; do not carry forward unverified
-  figures.
+  figures. Done; see `demo/README.md` and `docs/real-world.md`.
 - H&M (`Qdrant/hm_ecommerce_products`, 105,126 products, 384d BGE + SPLADE,
   facets, images) is the optional visual catalog act. Use it only if ingest and
   query model are already reproducible; otherwise record it as a follow-up.
-- No notebook state, no hidden steps.
+  Not delivered, see below.
+- No notebook state, no hidden steps. Done: `demo/report.py` runs the SQL files
+  and writes one Markdown file.
+
+Not delivered in this PR:
+
+- H&M visual catalog act. It needs a reproducible ingest and query model, which
+  this change does not add. Recorded as a follow-up in `demo/README.md` and
+  `docs/real-world.md`.
+- Per-query deep pages in `qdrant_batch` (`limit` above 128). v1 rejects them.
+- Vectors out of Qdrant (`with_vector`, retrieve by id), which Act 4/5 do not
+  need but a local rerank would.
 
 ## Bench contract
 
@@ -172,8 +191,9 @@ not depend on it. Parity, overhead, and cross-engine fusion are the bench's job.
 - H&M act: include only if reproducible inside the PR. Not included; recorded
   as a follow-up in `demo/README.md` and `docs/real-world.md`.
 - `qdrant_batch` text mode: `k`/`b` naming must match `qdrant_text`. They do,
-  including the defaults `1.2` and `0.75` and the `NaN`/`0` passthrough.
+  including the defaults `1.2` and `0.75` and the `'NaN'`/`0` passthrough.
 - Batch limit above 128: error in v1. Paging per query is a later change.
   Implemented as an `invalid_input` error before the RPC.
-- `qdrant_hybrid_text` paging: it matches `qdrant_hybrid`, which sends one
-  server-side fused page and no `offset`.
+- `qdrant_hybrid_text` paging: it matches `qdrant_hybrid`. Both now set `offset`
+  on the fused query and use one prefetch pool for every page, so `limit` above
+  128 returns distinct rows. Verified in the live test with 130 rows.

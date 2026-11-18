@@ -52,7 +52,6 @@ indexes.
 Useful flags:
 
 ```bash
-python demo/qdrant_setup.py --force             # recover over existing points
 python demo/qdrant_setup.py --skip-recover      # report only
 python demo/qdrant_setup.py --snapshot file:///data/other.snapshot --collection other
 ```
@@ -71,7 +70,21 @@ With a native Qdrant process, pass the host path instead, for example
 `file:///C:/data/esci.snapshot`.
 
 Expect `dense=384 Cosine` and a `text` payload index. The `text` index has
-BM25 scoring enabled; that is what `qdrant_text` uses.
+BM25 scoring enabled; the script prints `scoring bm25` and says so explicitly,
+because `qdrant_text`, `qdrant_batch` text mode, and `qdrant_hybrid_text` need
+it.
+
+### Act 1: inspect what was restored
+
+```bash
+duckdb -unsigned demo/demo.duckdb \
+  -cmd "LOAD 'build/debug/extension/qdrant/qdrant.duckdb_extension';" \
+  -f demo/inspect.sql
+```
+
+This reads the collection back through SQL: status, point counts, segment count,
+`created_at`, and a three-row payload sample. The payload index list comes from
+the setup script above, which reads the REST `payload_schema`.
 
 ## 3. Embed the evaluation queries
 
@@ -276,6 +289,72 @@ duckdb -unsigned demo/demo.duckdb -cmd "$LOAD" -f out/demo.sql
 Dense, BM25, and server-side hybrid results side by side for three queries, with
 titles and brands read from the payload in SQL.
 
+## 11. Business join (Act 3)
+
+```bash
+duckdb -unsigned demo/demo.duckdb -cmd "$LOAD" -f demo/decide.sql
+```
+
+`demo/decide.sql` joins the server-side hybrid top-10 to two things:
+
+- the real ESCI judgments in `out/judged.parquet`;
+- a synthetic `synthetic_stock` table with `units` and `margin`, derived from a
+  hash of `product_id`. It is reproducible and clearly **not** business data.
+
+The rule is "in stock and at least 8 points of margin". The file prints the
+candidate fate per query, one query before and after the rule, and nDCG@10 for
+the 50-query page before and after. In the measured run, 135 of 500 candidates
+were dropped and nDCG@10 fell from 0.2962 to 0.232: the filter is a business
+decision with a quality cost, and the report shows both numbers.
+
+## 12. Boundary: facets and formula queries (Act 5)
+
+```bash
+python demo/boundary.py
+duckdb -unsigned demo/demo.duckdb -f demo/groupby.sql
+```
+
+Facet counts and formula/boost expressions stay in Qdrant; the extension does
+not expose them. `demo/boundary.py` calls both over REST:
+
+- `POST /collections/esci-products/facet` for `brand` and `color`;
+- `POST /collections/esci-products/points/query` with a dense prefetch and
+  `$score + 0.5 * match(brand = 'Nature Valley')`.
+
+`demo/groupby.sql` is the DuckDB cross-check over the local `products` table.
+Both sides count the same rows; the measured top values match exactly:
+
+```text
+brand:  Nike=992, adidas=754, Hanes=513, Amazon Essentials=460, Under Armour=455
+color:  Black=18594, White=8114, Blue=3259, Red=2351, Silver=2336
+```
+
+That is the boundary in one place: Qdrant owns facets and score formulas,
+DuckDB owns `GROUP BY` over data you already have.
+
+## 13. One static report
+
+```bash
+configure/venv/Scripts/python.exe demo/report.py
+# or: uv run --with duckdb==2.0.0 demo/report.py --out out/report.md
+```
+
+`demo/report.py` runs `demo/decide.sql`, `demo/fuse.sql`, and `demo/evaluate.sql`
+against `demo/demo.duckdb`, reads the tables they create, and writes
+`out/report.md`. It calls `qdrant_collection_info` for the header. No notebook
+state and no hidden steps.
+
+## 14. Smoke test
+
+```bash
+duckdb -unsigned -cmd "LOAD 'build/debug/extension/qdrant/qdrant.duckdb_extension'; SET qdrant_url='http://127.0.0.1:6334';" -f demo/smoke.sql
+```
+
+`demo/smoke.sql` binds and runs all three new functions, including fused paging
+(`"limit" := 150` returns 150 distinct ids). `demo/limit-error.sql` is the
+expected failure: a batch limit of 130 must print
+`limit 130 is above 128; qdrant_batch returns one page per query in v1`.
+
 ## Measured on Qdrant 1.20.2
 
 Fifty judged ESCI queries, snapshot `esci-products.snapshot` (164,900 points),
@@ -288,13 +367,13 @@ DuckDB 2.0.0, extension built from this tree:
 | RRF in DuckDB over two top-50 lists | 0.2846 |
 | dense (`qdrant_batch` dense mode) | 0.2396 |
 
-Dense recall@10 against the exact DuckDB scan: 0.846.
+Dense recall@10 against the exact DuckDB scan: 0.868. The synthetic business
+rule in Act 3 keeps 365 of 500 candidates and moves nDCG@10 to 0.232.
 
-The same 50 dense queries, same limit and payload fields, as one batch call and
-as 50 separate `qdrant_query` calls, returned identical `(query_id, id, score)`
-rows (0 differences). Wall clock per CLI process: 226 ms for the batch file and
-3,080 ms for the 50-call file, with about 80 ms of startup in each. That is one
-50-query RPC against 50 RPCs, not a benchmark.
+The same 50 dense queries, same limit and payload fields, as one `qdrant_batch`
+call and as 50 separate `qdrant_query` calls, returned identical
+`(query_id, id, score)` rows: 0 differences. That is one RPC against 50 RPCs,
+not a benchmark, and the demo does not time it.
 
 ## What this demonstrates
 
@@ -308,7 +387,12 @@ rows (0 differences). Wall clock per CLI process: 226 ms for the batch file and
    with judgments, without a second pipeline.
 5. The same rows and model work in duck-vss, so the local/offline path is not a
    different index with different behavior.
-6. The remaining gaps are concrete: vectors out of Qdrant, deep batch pages
+6. A business rule can be evaluated in SQL next to real judgments: candidates
+   drop, ranks shift, and the quality cost is measured, with the synthetic table
+   labeled as such.
+7. Facets and score formulas stay in Qdrant; DuckDB `GROUP BY` is the cross-check
+   and matches the server counts.
+8. The remaining gaps are concrete: vectors out of Qdrant, deep batch pages
    above 128 per query, and the H&M catalog act. See
    [`docs/real-world.md`](../docs/real-world.md#roadmap).
 
@@ -320,6 +404,9 @@ rows (0 differences). Wall clock per CLI process: 226 ms for the batch file and
 - The exact scan is only practical at this corpus size. At 10M x 1024, sample.
 - Snapshot recovery requires a server that accepts the snapshot's format. The
   published ESCI snapshot requires 1.20+, which matches this demo.
+- `synthetic_stock.units` and `synthetic_stock.margin` are hashed values, not
+  inventory or margin data. Replace the table with real data to interpret the
+  Act 3 result; the SQL shape stays the same.
 - The H&M act (`Qdrant/hm_ecommerce_products`, BGE + SPLADE, facets, images) is
   not in this demo. It needs a reproducible ingest and query model first; it is
   a follow-up, not a blocker.

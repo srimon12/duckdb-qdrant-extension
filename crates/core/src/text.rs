@@ -154,11 +154,11 @@ pub fn register(extension: &Extension) -> Result<()> {
                     )
                     .add_example(
                         "BM25 products",
-                        "SELECT * FROM qdrant_text(collection := 'esci-products', query := 'cashew granola bars', field := 'text', \"limit\" := 10)",
+                        "SELECT * FROM qdrant_text(collection := 'articles', query := 'cashew granola bars', field := 'text', \"limit\" := 10)",
                     )
                     .add_example(
                         "Tuned BM25",
-                        "SELECT * FROM qdrant_text(collection := 'esci-products', query := 'granola', k := 1.5, b := 0.5)",
+                        "SELECT * FROM qdrant_text(collection := 'articles', query := 'granola', k := 1.5, b := 0.5)",
                     )
                     .add_category(CATEGORY),
             ),

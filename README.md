@@ -41,7 +41,7 @@ Full SQL for phase 2 is in [docs/phase-2.md](docs/phase-2.md). Full SQL for phas
 
 ### Phase 0–1
 
-`qdrant_query` is nearest neighbours. `qdrant_hybrid` prefetches one dense vector and one sparse vector, then fuses them with `rrf` or `dbsf`. `"using"` is the named vector. `"limit"` and `"offset"` also need quotes, because `USING`, `LIMIT`, and `OFFSET` are SQL keywords.
+`qdrant_query` is nearest neighbours. `qdrant_hybrid` prefetches one dense vector and one sparse vector, then fuses them with `rrf` or `dbsf`. `"using"` is the named vector, and it needs quotes because `USING` is a SQL keyword. `"limit"` needs quotes for the same reason. `"offset"` appears only on `qdrant_scroll`, where it is a point id, and needs quotes too.
 
 ```sql
 SELECT * FROM qdrant_query(
@@ -73,7 +73,7 @@ Phase 2 is still a read. It adds the other universal-query forms, plus the contr
 - `qdrant_context` uses those pairs and has no target.
 - `score_threshold` drops weaker hits.
 - `payload_fields` keeps only the named payload keys. `[]` returns `{}`.
-- A limit above 128 is fetched in pages of 128, then streamed into DuckDB chunks.
+- A limit above 128 is fetched in pages of 128, then streamed into DuckDB chunks. `qdrant_hybrid` pages the server-side fused result with `offset` and raises its prefetch floor to the requested limit, so the fused order does not shift between pages.
 
 ```sql
 SELECT id, score, payload->>'year'
@@ -135,7 +135,7 @@ overrides work the same as on `qdrant_query`. The row is `id`, `score`,
 `payload`.
 
 `k` and `b` are the BM25 knobs. They default to `1.2` and `0.75`, which are also
-Qdrant's defaults. Pass `NaN` or `0` to send no value and let the server's
+Qdrant's defaults. Pass `'NaN'` or `0` to send no value and let the server's
 scorer defaults apply. Named calls that predate the knobs keep working:
 
 ```sql
@@ -191,7 +191,9 @@ FROM qdrant_hybrid_text(
 `TextQueryBuilder` on the payload field, and fuses them with `rrf` or `dbsf`.
 There is no sparse model and no sparse vector. `text_field` names the payload
 field, and that field needs the BM25 index above. The SQL fusion above stays
-useful when you want the two ranked lists in DuckDB.
+useful when you want the two ranked lists in DuckDB. A `limit` above 128 is
+paged with `offset`, and the prefetch floor rises to the requested limit so the
+fused order stays stable.
 
 #### Batch (Qdrant 1.20.2)
 
@@ -202,22 +204,23 @@ all of them. Qdrant 1.20.2 optimized exactly this shape. Rows are
 `queries` is a JSON string. Dense mode is an array of vectors, text mode is an
 array of query strings. `mode` is `dense` or `text`. `using` names the vector in
 dense mode; `field`, `k`, and `b` name the payload field and BM25 knobs in text
-mode.
+mode. The two modes reject each other's argument: `using` in text mode and a
+non-default `field` in dense mode are errors, not ignored.
 
 ```sql
-SELECT query_index, id, score, payload->>'title'
+SELECT query_index, id, score, payload->>'year'
 FROM qdrant_batch(
-  collection := 'esci-products',
+  collection := 'articles',
   queries := '[[0.1,0.2,0.3],[0.4,0.5,0.6]]',
   mode := 'dense',
   "using" := 'dense',
   "limit" := 10,
-  payload_fields := 'title,brand'
+  payload_fields := 'year,title'
 );
 
 SELECT query_index, id, score, payload->>'title'
 FROM qdrant_batch(
-  collection := 'esci-products',
+  collection := 'articles',
   queries := '["cashew granola bars","protein bars"]',
   mode := 'text',
   field := 'text',
@@ -230,6 +233,17 @@ FROM qdrant_batch(
 `limit` is one page per query, so it must be 128 or less. A larger value is an
 error, not a paged scan. That is the v1 rule; paging per query is a later change.
 The rows keep the server order inside each `query_index`.
+
+A query with no hits contributes no rows. Join against your own query list with a
+`LEFT JOIN` when every query id must survive:
+
+```sql
+SELECT q.query_id, b.id, b.score
+FROM (VALUES (0, 114), (1, 2891)) AS q(query_index, query_id)
+LEFT JOIN qdrant_batch(collection := 'articles', queries := '[[0.1,0.2],[0.3,0.4]]',
+                       mode := 'dense', "using" := 'dense', "limit" := 10) b
+  ON b.query_index = q.query_index;
+```
 
 ## Out of scope
 
@@ -246,5 +260,5 @@ cargo test -p qdrant_core --lib live_qdrant_120
 
 The live test creates a throwaway collection, runs phase 2, phase 3, BM25,
 `qdrant_batch` dense and text parity against the single-query calls, and
-`qdrant_hybrid_text`, then deletes the collection. It also checks that a batch
-limit above 128 fails.
+`qdrant_hybrid_text`, then deletes the collection. It also checks fused paging
+past 128 rows and that a batch limit above 128 fails.

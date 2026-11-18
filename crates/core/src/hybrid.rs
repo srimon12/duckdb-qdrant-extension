@@ -141,10 +141,13 @@ pub fn run_hybrid(
     request: &HybridRequest,
 ) -> std::result::Result<Vec<crate::result::QueryRow>, String> {
     let request = request.clone();
-    run_pages(&request.scope, "qdrant_hybrid", |_offset, page| {
+    // One candidate pool for every page, or the fused order shifts between pages.
+    let coverage = request.scope.limit.max(request.prefetch_limit);
+    run_pages(&request.scope, "qdrant_hybrid", |offset, page| {
         let mut scoped = request.clone();
         scoped.scope.limit = page;
-        hybrid_query(&scoped)
+        scoped.prefetch_limit = coverage;
+        hybrid_query(&scoped, offset)
     })
 }
 
@@ -259,10 +262,13 @@ pub fn run_hybrid_text(
     request: &HybridTextRequest,
 ) -> std::result::Result<Vec<crate::result::QueryRow>, String> {
     let request = request.clone();
-    run_pages(&request.scope, "qdrant_hybrid_text", |_offset, page| {
+    // One candidate pool for every page, or the fused order shifts between pages.
+    let coverage = request.scope.limit.max(request.prefetch_limit);
+    run_pages(&request.scope, "qdrant_hybrid_text", |offset, page| {
         let mut scoped = request.clone();
         scoped.scope.limit = page;
-        hybrid_text_query(&scoped)
+        scoped.prefetch_limit = coverage;
+        hybrid_text_query(&scoped, offset)
     })
 }
 
@@ -321,7 +327,7 @@ pub fn register(extension: &Extension) -> Result<()> {
                     )
                     .add_example(
                         "RRF over dense and text",
-                        "SELECT * FROM qdrant_hybrid_text(collection := 'esci-products', dense_query := [0.1, 0.2]::DOUBLE[], text_query := 'cashew granola bars', fusion := 'rrf', dense_using := 'dense', text_field := 'text')",
+                        "SELECT * FROM qdrant_hybrid_text(collection := 'articles', dense_query := [0.1, 0.2]::DOUBLE[], text_query := 'cashew granola bars', fusion := 'rrf', dense_using := 'dense', text_field := 'text')",
                     )
                     .add_category(CATEGORY),
             ),

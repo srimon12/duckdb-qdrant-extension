@@ -66,7 +66,34 @@ def summary(info):
     ))
     indexes = info.get("payload_schema") or {}
     if indexes:
-        print("payload index: " + ", ".join(sorted(indexes)))
+        print("payload index: " + ", ".join(
+            f"{name} ({params.get('data_type')}{scoring(params)})"
+            for name, params in sorted(indexes.items())
+        ))
+    else:
+        print("payload index: none")
+    if has_bm25(info):
+        print("bm25:          text index with BM25 scoring found")
+    else:
+        print("bm25:          MISSING; qdrant_text and qdrant_hybrid_text need a")
+        print("               text index with scoring enabled")
+
+
+def scoring(params):
+    """The BM25 marker for one payload index, or an empty string."""
+    scorer = (params.get("params") or {}).get("scoring")
+    if not scorer:
+        return ""
+    kind = scorer.get("type") if isinstance(scorer, dict) else str(scorer)
+    return f", scoring {kind}" if kind else ""
+
+
+def has_bm25(info):
+    for params in (info.get("payload_schema") or {}).values():
+        scorer = (params.get("params") or {}).get("scoring") or {}
+        if isinstance(scorer, dict) and scorer.get("type") == "bm25":
+            return True
+    return False
 
 
 def main():

@@ -100,10 +100,10 @@ sparse model.
 | Batch queries, one shared filter | Yes, this change | `qdrant_batch`; dense or text, one page per query, limit at most 128 |
 | Recommend, discover, context | Yes | `qdrant_recommend`, `qdrant_discover`, `qdrant_context` |
 | Filters: match, range, nested, prefix, substring, min_should | Yes | Filter JSON; unknown keys error |
-| Score threshold, payload selection, paging past 128 | Yes | Same args on every search |
+| Score threshold, payload selection, paging past 128 | Yes | Same args on every search; hybrid fusions page with `offset` and a prefetch floor equal to the limit |
 | Collection list and info | Yes | `created_at` included |
 | Scroll | Yes, payload only | No vectors, no bulk export |
-| Upsert | Yes | One batch RPC or one point per row |
+| Upsert | Frozen | Code and tests stay; not advertised as a loader, no new features |
 | Point delete, payload set/delete | No | |
 | Collection create/delete, aliases, payload indexes | No | |
 | Count | No | Use `qdrant_collection_info` for an approximate count |
@@ -287,6 +287,26 @@ The demo measures:
 The dense and BM25 runs go through `qdrant_batch`: fifty queries per RPC,
 `query_index` maps a row back to its query.
 
+The acts match the brief:
+
+1. Restore and inspect: `demo/qdrant_setup.py` prints points, vectors, payload
+   indexes, and the BM25 marker; `demo/inspect.sql` reads `qdrant_collection_info`
+   and a payload sample back through SQL.
+2. Retrieval ladder: `out/topk.sql`, `out/text_topk.sql`, and `out/hybrid.sql`.
+3. Decide: `demo/decide.sql` joins server-side hybrid top-10 to real judgments
+   and to a synthetic, hash-derived stock/margin table, then reports candidates
+   kept or dropped and nDCG@10 before and after. The synthetic table is labeled
+   as such in every output.
+4. Verify: `out/exact.sql`, `demo/fuse.sql`, `demo/evaluate.sql`, and
+   `out/hnsw.sql`.
+5. Boundary: `demo/boundary.py` calls Qdrant facets and a `$score + boost`
+   formula over REST; `demo/groupby.sql` is the DuckDB `GROUP BY` cross-check.
+   The measured facet counts match exactly. These features stay in Qdrant.
+
+`demo/report.py` runs the result SQL and writes a static `out/report.md`.
+`demo/smoke.sql` binds all three new functions through DuckDB so argument-order
+mistakes fail fast.
+
 ## Roadmap
 
 Ordered by impact per unit of work, not by wishlist.
@@ -315,10 +335,11 @@ upsert is a larger API change and should be designed with the batch function.
 
 `cargo test -p qdrant_core --lib` covers the request builders, filter parser,
 timestamp formatting, and result mapping, including batch JSON parsing and the
-hybrid text prefetch. The live test exercises Qdrant 1.20 only when
-`QDRANT_TEST_URL` points at a gRPC endpoint; it includes a BM25 index,
+hybrid text prefetch with its offset. The live test exercises Qdrant 1.20 only
+when `QDRANT_TEST_URL` points at a gRPC endpoint; it includes a BM25 index,
 `qdrant_text` with `k`/`b`, `qdrant_batch` dense and text parity against
-single-query calls, `qdrant_hybrid_text`, and the 128-row batch limit error.
+single-query calls on `(id, score)`, `qdrant_hybrid_text`, fused paging to 130
+distinct rows, and the 128-row batch limit error.
 
 The demo ran end to end on Windows: Qdrant `v1.20.2` in Docker (WSL2), DuckDB
 `v2.0.0` CLI, the extension built from this tree, and the published ESCI
@@ -332,15 +353,21 @@ snapshot (164,900 points). With the first 50 judged queries, re-measured on
 | RRF in DuckDB over two top-50 lists | 0.2846 |
 | Dense, `qdrant_batch` dense mode | 0.2396 |
 
-Dense recall@10 against the exact DuckDB scan was 0.846. The local mirror built
-in about 36 s, 50 exact scans took about 1 s, and `EXPLAIN ANALYZE` showed the
-duck-vss HNSW index scan.
+Dense recall@10 against the exact DuckDB scan was 0.868. `EXPLAIN ANALYZE` on the
+literal query plans the local `products_hnsw` index. The exact scan is a
+minute-scale job at 165k x 384.
+
+The synthetic business rule in Act 3 keeps 365 of 500 candidates and moves
+nDCG@10 to 0.232. The server-side facet counts for `brand` and `color` match
+the DuckDB `GROUP BY` exactly.
 
 Batch parity: the same 50 dense queries, limit, and payload fields returned
-identical `(query_id, id, score)` rows as 50 separate `qdrant_query` calls.
-Wall clock per CLI process was 226 ms for the one-RPC batch file and 3,080 ms
-for the 50-call file, about 80 ms of that startup. These are one 50-query
-slice, not a benchmark.
+identical `(query_id, id, score)` rows as 50 separate `qdrant_query` calls. That
+is one RPC against 50; the demo does not time it.
+
+Fused paging: `qdrant_hybrid_text` with `"limit" := 150` on esci-products
+returned 150 rows and 150 distinct ids. The fix that makes this work is a
+per-page `offset` on the fused query plus one prefetch pool for every page.
 
 One finding from the run: DuckDB parses named arguments whose names are SQL
 keywords only when quoted. `"using"`, `"limit"`, and `"offset"` need quotes;

@@ -35,7 +35,9 @@ SELECT * FROM qdrant_scroll(
 
 ## Upsert
 
-Upsert is a thin write. It is not update-by-filter, not delete, and not a payload patch.
+Upsert is frozen. The code stays for tests and small writes, but it is not a
+loader and gets no new features: a snapshot or the source pipeline owns bulk
+load. It is not update-by-filter, not delete, and not a payload patch.
 
 The batch form sends one RPC:
 
@@ -58,3 +60,7 @@ SELECT qdrant_upsert_one('articles', id, embedding, payload) FROM articles;
 ```
 
 Each row is its own RPC. Prefer `qdrant_upsert` when the ids and vectors are already lists.
+
+Bulk load is out of scope. Do not grow these functions into a loader: use a
+snapshot or the source pipeline, then read the collection through the search
+functions.

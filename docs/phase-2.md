@@ -9,7 +9,7 @@ The same tail applies to `qdrant_query`, `qdrant_hybrid`, and the three function
 | `limit` | Maximum hits. Values above 128 are fetched in pages of 128. |
 | `filter` | Qdrant JSON filter. Unknown fields error. |
 | `using` | Named vector. Write it as `"using"` because `USING` is reserved. |
-| `score_threshold` | Drop hits worse than this score. `NaN` means no threshold. |
+| `score_threshold` | Drop hits worse than this score. `'NaN'` means no threshold. |
 | `payload_fields` | JSON array or comma-separated keys. Empty follows `qdrant_with_payload`. `[]` returns `{}`. |
 | `url`, `api_key`, `timeout_secs` | Override the session settings. `timeout_secs := 0` keeps the setting. |
 
@@ -73,3 +73,5 @@ SELECT * FROM qdrant_context(
 ## Paging
 
 Qdrant returns one page per RPC. This extension asks for at most 128 hits per RPC and repeats with `offset` until `limit` is filled or a page comes back short. DuckDB then reads those rows in its own chunks. You do not pass the page size.
+
+`qdrant_hybrid` and `qdrant_hybrid_text` follow the same rule. The fused result is paged with `offset`, and the prefetch floor is the requested `limit`, so every page is scored against the same candidate pool. Without that floor, the fused order would shift between pages and ids would repeat.

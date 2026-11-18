@@ -191,7 +191,7 @@ pub fn text_query(text: &str, k: Option<f32>, b: Option<f32>) -> Query {
     }
 }
 
-pub fn hybrid_text_query(request: &HybridTextRequest) -> QueryPointsBuilder {
+pub fn hybrid_text_query(request: &HybridTextRequest, offset: u64) -> QueryPointsBuilder {
     let mut dense = PrefetchQueryBuilder::default()
         .query(Query::new_nearest(request.dense.clone()))
         .limit(request.prefetch_limit);
@@ -209,6 +209,7 @@ pub fn hybrid_text_query(request: &HybridTextRequest) -> QueryPointsBuilder {
             .add_prefetch(dense)
             .add_prefetch(text),
     )
+    .offset(offset)
 }
 
 pub fn parse_batch_mode(text: &str) -> Result<BatchMode, String> {
@@ -285,7 +286,7 @@ pub fn batch_queries(scope: &Scope, queries: &[Query]) -> Vec<QueryPoints> {
         .collect()
 }
 
-pub fn hybrid_query(request: &HybridRequest) -> QueryPointsBuilder {
+pub fn hybrid_query(request: &HybridRequest, offset: u64) -> QueryPointsBuilder {
     let mut dense = PrefetchQueryBuilder::default()
         .query(Query::new_nearest(request.dense.clone()))
         .limit(request.prefetch_limit);
@@ -306,6 +307,7 @@ pub fn hybrid_query(request: &HybridRequest) -> QueryPointsBuilder {
             .add_prefetch(dense)
             .add_prefetch(sparse),
     )
+    .offset(offset)
 }
 
 pub fn recommend_query(request: &RecommendRequest) -> QueryPointsBuilder {
@@ -989,11 +991,12 @@ mod tests {
             fusion: Fusion::Rrf,
             prefetch_limit: 100,
         };
-        let query = hybrid_text_query(&request).build();
+        let query = hybrid_text_query(&request, 128).build();
         assert_eq!(query.prefetch.len(), 2);
         assert_eq!(query.prefetch[0].using.as_deref(), Some("dense"));
         assert_eq!(query.prefetch[1].using.as_deref(), Some("text"));
         assert_eq!(query.prefetch[1].limit, Some(100));
+        assert_eq!(query.offset, Some(128));
         assert!(matches!(
             query.prefetch[1]
                 .query

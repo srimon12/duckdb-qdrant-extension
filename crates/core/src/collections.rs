@@ -274,14 +274,15 @@ fn collection_info(bind: &InfoBind) -> std::result::Result<Vec<InfoRow>, String>
         created_at: info
             .created_at
             .as_ref()
-            .map(|ts| rfc3339_utc(ts.seconds, ts.nanos)),
+            .and_then(|ts| rfc3339_utc(ts.seconds, ts.nanos)),
     }])
 }
 
 /// Format a UTC timestamp. Qdrant 1.20 records `created_at` on the collection.
-fn rfc3339_utc(seconds: i64, _nanos: i32) -> String {
+/// A timestamp before the Unix epoch is not a valid record, so it becomes NULL.
+fn rfc3339_utc(seconds: i64, _nanos: i32) -> Option<String> {
     if seconds < 0 {
-        return format!("{seconds}");
+        return None;
     }
     let days = seconds.div_euclid(86_400);
     let tod = seconds.rem_euclid(86_400) as u32;
@@ -289,7 +290,9 @@ fn rfc3339_utc(seconds: i64, _nanos: i32) -> String {
     let hour = tod / 3600;
     let minute = (tod % 3600) / 60;
     let second = tod % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
 }
 
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
@@ -356,7 +359,15 @@ mod tests {
 
     #[test]
     fn unix_epoch_is_rfc3339() {
-        assert_eq!(rfc3339_utc(0, 0), "1970-01-01T00:00:00Z");
-        assert_eq!(rfc3339_utc(1_700_000_000, 0), "2023-11-14T22:13:20Z");
+        assert_eq!(rfc3339_utc(0, 0).as_deref(), Some("1970-01-01T00:00:00Z"));
+        assert_eq!(
+            rfc3339_utc(1_700_000_000, 0).as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
+    }
+
+    #[test]
+    fn negative_timestamp_is_null() {
+        assert_eq!(rfc3339_utc(-5, 0), None);
     }
 }

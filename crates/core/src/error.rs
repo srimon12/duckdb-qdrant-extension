@@ -8,8 +8,8 @@ use std::fmt;
 use qdrant_client::QdrantError;
 use tonic::Code;
 
-/// A failure a SQL caller can read. Variants exist so tests and logs can tell
-/// a missing collection from a bad vector without parsing prose.
+/// A failure a SQL caller can read. The kind is kept so classification does not
+/// depend on parsing the message.
 #[derive(Debug)]
 pub struct CallError {
     kind: Kind,
@@ -33,14 +33,6 @@ impl CallError {
     pub fn other(message: impl Into<String>) -> Self {
         Self {
             kind: Kind::Other,
-            message: message.into(),
-        }
-    }
-
-    /// Build an error for a bad argument found before the request is sent.
-    pub fn invalid(message: impl Into<String>) -> Self {
-        Self {
-            kind: Kind::Invalid,
             message: message.into(),
         }
     }

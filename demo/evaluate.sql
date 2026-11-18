@@ -53,16 +53,19 @@ FROM (
 WHERE rnk <= 10
 GROUP BY query_id;
 
+CREATE OR REPLACE TABLE ndcg_at_10 AS
 SELECT
     d.run,
     count(*) AS queries,
     round(avg(d.dcg / nullif(i.idcg, 0)), 4) AS ndcg_at_10
 FROM dcg d
 JOIN ideal i ON i.query_id = d.query_id
-GROUP BY d.run
-ORDER BY ndcg_at_10 DESC;
+GROUP BY d.run;
+
+SELECT * FROM ndcg_at_10 ORDER BY ndcg_at_10 DESC;
 
 -- How often Qdrant's dense top-10 agrees with the exact DuckDB top-10.
+CREATE OR REPLACE TABLE recall_at_10 AS
 SELECT
     round(avg(hits / 10.0), 4) AS recall_at_10_vs_exact
 FROM (
@@ -75,3 +78,5 @@ FROM (
     WHERE r.run = 'dense' AND r.rnk <= 10
     GROUP BY r.query_id
 );
+
+SELECT * FROM recall_at_10;
