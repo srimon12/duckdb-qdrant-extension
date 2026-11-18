@@ -10,7 +10,14 @@ make debug
 duckdb -unsigned -cmd "LOAD 'build/debug/extension/qdrant/qdrant.duckdb_extension';"
 ```
 
-Wasm is not a target.
+Wasm is not a target. The distribution workflow excludes `wasm_mvp`, `wasm_eh`, and `wasm_threads`, because `tokio`/`mio` do not build for `wasm32`. It also excludes `linux_amd64_musl`.
+
+## CI
+
+`Main Extension Distribution Pipeline` builds `windows_amd64` and `linux_amd64`
+on a pull request (reduced CI mode), and also `linux_arm64`, `osx_arm64`, and
+`windows_amd64_mingw` on `main`. `Rust checks` runs fmt, clippy, and the unit
+tests.
 
 ## Settings
 
